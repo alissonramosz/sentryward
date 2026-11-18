@@ -85,7 +85,8 @@ export async function sweepClosedChanges({
       // A flaky forge or a change it no longer knows: asked again after the
       // recheck period rather than every pass.
       result.failed++;
-      console.error(`[backlog] could not check ${repo.fullPath}#${number}`, err);
+      // A constant format string: the path is forge-provided text.
+      console.error("[backlog] could not check %s#%d", repo.fullPath, number, err);
       await touch(repositoryId, number, now).catch(() => undefined);
     }
   }

@@ -237,7 +237,8 @@ export async function recordChangeState(input: ChangeStateInput): Promise<MergeO
 // after their main work): a failed record is retried by the sweep.
 export function recordChangeStateQuietly(input: ChangeStateInput): Promise<MergeOutcome | null> {
   return recordChangeState(input).catch((err: unknown) => {
-    console.error(`[backlog] could not record ${input.state} for change ${input.number}`, err);
+    // A constant format string: state and number arrive from webhook payloads.
+    console.error("[backlog] could not record %s for change %d", input.state, input.number, err);
     return null;
   });
 }
