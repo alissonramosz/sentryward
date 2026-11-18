@@ -14,6 +14,7 @@ import {
   enableRepoSchema,
   listReposQuerySchema,
   reorderReposSchema,
+  repoConfigQuerySchema,
   repoIdParamSchema,
   updateRepoSchema,
 } from "../schemas/repos.schema.ts";
@@ -28,6 +29,7 @@ const publicRepo = {
   defaultBranch: true,
   enabled: true,
   settings: true,
+  directories: true,
   followGlobal: true,
   createdAt: true,
 } as const;
@@ -58,6 +60,7 @@ export async function listRepos(req: Request, res: Response) {
       webUrl: `${hostOrigin(repo.connection.host)}/${repo.fullPath}`,
       enabled: repo.enabled,
       settings: repo.settings,
+      directories: repo.directories,
       followGlobal: repo.followGlobal,
       position: repo.position,
     })),
@@ -190,7 +193,7 @@ async function loadOwnedRepo(workspaceId: string, id: string) {
 
 export async function updateRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
-  const { enabled, settings, followGlobal } = updateRepoSchema.parse(req.body);
+  const { enabled, settings, directories, followGlobal } = updateRepoSchema.parse(req.body);
   const existing = await loadOwnedRepo(req.workspaceId!, id);
 
   if (settings?.llm && "connection" in settings.llm) {
@@ -199,13 +202,31 @@ export async function updateRepo(req: Request, res: Response) {
     }
     await requireStoredLlmConnection(req.workspaceId!, settings.llm.connection);
   }
-  if (settings?.rules?.length) {
+  for (const dir of directories ?? []) {
+    if (!dir.settings.llm || !("connection" in dir.settings.llm)) continue;
+    if (!dir.settings.llm.connection) {
+      throw new HttpError(400, "Validation failed", { directories: [`${dir.path}: Select an LLM connection`] });
+    }
+    await requireStoredLlmConnection(req.workspaceId!, dir.settings.llm.connection);
+  }
+  // Each part is checked only when it is saved: rules a later change below
+  // leaves out are reported as review warnings, as for the global config.
+  const folderRules = directories?.some((dir) => dir.settings.rules?.length);
+  if (settings?.rules?.length || folderRules) {
     const issues = repoSettingsRuleIssues({
       globalSettings: existing.connection.workspace.reviewSettings,
-      repoSettings: settings,
+      repoSettings: settings ?? existing.settings,
+      directories: directories ?? existing.directories,
       followGlobal: followGlobal ?? existing.followGlobal,
     });
-    if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
+    const repoIssues = settings?.rules?.length ? issues.filter((issue) => issue.directory === undefined) : [];
+    const dirIssues = folderRules ? issues.filter((issue) => issue.directory !== undefined) : [];
+    if (repoIssues.length || dirIssues.length) {
+      throw new HttpError(400, "Validation failed", {
+        ...(repoIssues.length ? { rules: repoIssues.map((issue) => issue.message) } : {}),
+        ...(dirIssues.length ? { directories: dirIssues.map((issue) => issue.message) } : {}),
+      });
+    }
   }
 
   // Turning a repository on or off by hand overrides any access-loss marker,
@@ -216,7 +237,7 @@ export async function updateRepo(req: Request, res: Response) {
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.repository.update({
       where: { id },
-      data: { enabled, settings, followGlobal, accessLostAt },
+      data: { enabled, settings, directories, followGlobal, accessLostAt },
     });
     if (enabled === false) await cancelForDisabledRepositories([id], DISABLED_REASON, tx);
     return row;
@@ -247,6 +268,7 @@ export async function deleteRepo(req: Request, res: Response) {
 // with where each value came from and anything wrong with the repository file.
 export async function getRepoConfig(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
+  const { directory } = repoConfigQuerySchema.parse(req.query);
   const repo = await loadOwnedRepo(req.workspaceId!, id);
 
   const loaded = await loadReviewConfig({
@@ -255,10 +277,15 @@ export async function getRepoConfig(req: Request, res: Response) {
     ref: repo.defaultBranch,
     globalSettings: repo.connection.workspace.reviewSettings,
     repoSettings: repo.settings,
+    directories: repo.directories,
+    directory,
     followGlobal: repo.followGlobal,
   }).catch((err: unknown) => {
     throw toHttpError(err, repo.provider);
   });
+  // A folder that is not saved (or is ignored while following the global
+  // config) would silently show the repository's config instead.
+  if (directory && !loaded.directory && !repo.followGlobal) throw new HttpError(404, "Folder not found");
   res.json({ ref: repo.defaultBranch, ...loaded });
 }
 

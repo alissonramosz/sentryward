@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button"
 import type { ReviewDetail, ReviewErrorKind } from "../types"
 
 // Where each kind of error is fixed. The trigger link opens the repository's
-// own scope, since that is where its overrides (if any) live.
+// own scope (or the folder the run used), since that is where its overrides
+// (if any) live.
 function fixFor(kind: ReviewErrorKind, review: ReviewDetail): { label: string; to: string } {
   switch (kind) {
     case "llm_connection":
@@ -20,8 +21,16 @@ function fixFor(kind: ReviewErrorKind, review: ReviewDetail): { label: string; t
     case "privacy":
       return { label: "Review the privacy policy", to: "/privacy" }
     case "trigger":
-      return { label: "Change trigger settings", to: `/configuration?repo=${review.repository.id}&tab=triggers` }
+      return { label: "Change trigger settings", to: triggerSettingsLink(review) }
   }
+}
+
+function triggerSettingsLink(review: ReviewDetail) {
+  const params = new URLSearchParams({ repo: review.repository.id })
+  const directory = review.resolvedConfig?.directory
+  if (directory) params.set("dir", directory)
+  params.set("tab", "triggers")
+  return `/configuration?${params}`
 }
 
 // A trigger the repository file set cannot be changed from the dashboard.

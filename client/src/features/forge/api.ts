@@ -59,6 +59,11 @@ export interface ConnectionDetails {
 }
 
 // A repository the user has added to Sentryward.
+export interface DirectorySetting {
+  path: string
+  settings: ConfigOverride
+}
+
 export interface ForgeRepo {
   id: string
   connectionId: string
@@ -69,7 +74,10 @@ export interface ForgeRepo {
   webUrl: string
   enabled: boolean
   settings: ConfigOverride
-  // Ignore `settings` and use the global config.
+  // Folders with settings of their own; a review uses one only when every
+  // file it changes is inside it.
+  directories: DirectorySetting[]
+  // Ignore `settings` and `directories` and use the global config.
   followGlobal: boolean
   // Place in the Repositories tab's dragged order; null sorts last, by path.
   position: number | null

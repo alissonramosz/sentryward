@@ -264,6 +264,33 @@ describe("runJob", () => {
     expect(findings[0]).toMatchObject({ state: "open", lifecycle: "new", author: "alice", lastJobId: job.id });
   });
 
+  it("reviews with the settings of the folder the change sits in, and records it", async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { directories: [{ path: "src", settings: { review: { blockOn: "critical" } } }, { path: "lib", settings: {} }] },
+    });
+    const job = await claimedJob();
+    const { runDeps } = deps({}, { code_review: { findings: [modelFinding()] }, walkthrough: WALKTHROUGH });
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect((stored.result as ReviewResult).verdict.blockOn).toBe("critical");
+    expect(stored.resolvedConfig).toMatchObject({ directory: "src", sources: { "review.blockOn": "directory" } });
+  });
+
+  it("uses the repository settings when no folder holds the whole change", async () => {
+    await prisma.repository.update({ where: { id: repositoryId }, data: { directories: [{ path: "lib", settings: { review: { blockOn: "critical" } } }] } });
+    const job = await claimedJob();
+    const { runDeps } = deps({}, { code_review: { findings: [modelFinding()] }, walkthrough: WALKTHROUGH });
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect((stored.result as ReviewResult).verdict.blockOn).toBe("major");
+    expect(stored.resolvedConfig).toMatchObject({ directory: null });
+  });
+
   it("records each call's cost at the workspace's prices, and as unknown where none is known", async () => {
     await prisma.workspace.update({
       where: { id: workspaceId },

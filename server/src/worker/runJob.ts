@@ -202,6 +202,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   const saved = {
     globalSettings: repo.connection.workspace.reviewSettings,
     repoSettings: repo.settings,
+    directories: repo.directories,
     followGlobal: repo.followGlobal,
   };
   // The repository file can only be read once the change is known, so the
@@ -235,6 +236,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     project: repo.fullPath,
     ref: changeSet.forgeRef.baseSha,
     ...saved,
+    changedFiles: changeSet.files,
     cache: cacheFor(savedDisablesCache),
   });
 
@@ -249,7 +251,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     await complete(job.id, job.attempts, {
       status: "skipped",
       verdict: null,
-      resolvedConfig: { config, sources: loaded.sources, repoFile: loaded.repoFile },
+      resolvedConfig: { config, sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory },
       error: skip,
       headSha: changeSet.forgeRef.headSha,
       baseSha: changeSet.forgeRef.baseSha,
@@ -302,7 +304,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
 
   const targetUrl = `${env.CLIENT_ORIGIN}/reviews/${job.id}`;
   const ref = changeSet.forgeRef;
-  const resolvedConfig = { config, sources: loaded.sources, repoFile: loaded.repoFile };
+  const resolvedConfig = { config, sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory };
 
   // A person can cancel any running job, so it is always watched. Closing the
   // change cancels its queued jobs from the webhook; with abortOnClose this also

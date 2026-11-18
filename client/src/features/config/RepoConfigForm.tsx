@@ -58,7 +58,7 @@ export function RepoConfigForm(props: {
   // Edits are locked while the repository follows the global config, so
   // there is nothing to lose then.
   const dirty = isDirty(repo.settings, form) && !repo.followGlobal
-  const leaving = useUnsavedChanges(dirty, ["repo"])
+  const leaving = useUnsavedChanges(dirty, ["repo", "dir"])
   const patternErrors = useRulePatternErrors(form.rules.map((rule) => rule.pattern)).data
   const errors = validateForm(
     form,

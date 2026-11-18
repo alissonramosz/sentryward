@@ -102,7 +102,8 @@ const SOURCE_LABEL: Record<string, string> = {
   default: "default",
   profile: "profile",
   global: "global config",
-  repoSettings: "these settings",
+  repoSettings: "repository settings",
+  directory: "folder settings",
   repoFile: "repository file",
   trigger: "trigger",
 }
@@ -112,6 +113,7 @@ const BADGE_LABEL: Record<string, string> = {
   default: "default",
   global: "global",
   repoSettings: "repo override",
+  directory: "folder",
   trigger: "trigger",
 }
 
@@ -1450,6 +1452,10 @@ export function ConfigFields(props: {
   rulePatternErrors?: Record<string, string | null>
   disabled?: boolean
   guidanceLabel?: string
+  // The layer this form saves, whose values are already in its inputs: the
+  // global config, a repository's settings, or one of its folders (which edits
+  // like a repository, inheriting from the repository's settings).
+  ownLayer?: "global" | "repoSettings" | "directory"
 }) {
   const { mode, form, config, sources, inherited, disabled } = props
   const errors = props.errors ?? {}
@@ -1503,7 +1509,7 @@ export function ConfigFields(props: {
   function effective(path: string, value: unknown) {
     if (!config) return undefined
     const source = sources?.[path]
-    if (source === (isRepo ? "repoSettings" : "global")) return undefined
+    if (source === (props.ownLayer ?? (isRepo ? "repoSettings" : "global"))) return undefined
     return (
       <span className="inline-flex flex-wrap items-center gap-1.5">
         <span>Effective: {describe(value, undefined)}</span>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "@/lib/api"
-import type { ForgeRepo, SavedRepo } from "@/features/forge/api"
+import type { DirectorySetting, ForgeRepo, SavedRepo } from "@/features/forge/api"
 import { MAX_RULE_PATTERN, MAX_RULES } from "./settingsForm"
 
 export type LlmProviderName = "anthropic" | "openai" | "google" | "ollama"
@@ -225,6 +225,8 @@ export interface EffectiveConfig {
 export interface ResolvedConfig {
   ref: string
   repoFile: string | null
+  // The folder whose settings are included, when one was asked for.
+  directory: string | null
   warnings: string[]
   sources: Record<string, string>
   config: EffectiveConfig
@@ -279,11 +281,26 @@ export function useSaveGlobalConfig() {
   })
 }
 
-export function useRepoConfig(repoId: string | null) {
+// With a folder, what a change inside only that folder would be reviewed with.
+export function useRepoConfig(repoId: string | null, directory?: string) {
   return useQuery({
-    queryKey: ["repo-config", repoId],
-    queryFn: () => api<ResolvedConfig>(`/repos/${repoId}/config`),
+    queryKey: ["repo-config", repoId, directory ?? null],
+    queryFn: () =>
+      api<ResolvedConfig>(`/repos/${repoId}/config${directory ? `?directory=${encodeURIComponent(directory)}` : ""}`),
     enabled: Boolean(repoId),
+  })
+}
+
+// Folders are saved as one list, as the server replaces it whole.
+export function useSaveRepoDirectories() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ repoId, directories }: { repoId: string; directories: DirectorySetting[] }) =>
+      api<{ repo: SavedRepo }>(`/repos/${repoId}`, { method: "PATCH", body: JSON.stringify({ directories }) }),
+    onSuccess: (_data, { repoId }) => {
+      queryClient.invalidateQueries({ queryKey: ["repos"] })
+      queryClient.invalidateQueries({ queryKey: ["repo-config", repoId] })
+    },
   })
 }
 

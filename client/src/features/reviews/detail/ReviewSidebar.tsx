@@ -204,6 +204,13 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
             {TRIGGER_LABEL[review.trigger]}
           </span>
         </Row>
+        {review.resolvedConfig?.directory && (
+          <Row label="Settings">
+            <span title={`Folder settings for ${review.resolvedConfig.directory}`}>
+              Folder <code>{review.resolvedConfig.directory}</code>
+            </span>
+          </Row>
+        )}
         {review.focus && (
           <Row label="Focus">
             {/* The row truncates; the whole request is on hover. */}

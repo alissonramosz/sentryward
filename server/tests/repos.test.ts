@@ -1023,3 +1023,66 @@ describe("GitHub token connections get their own repository hook", () => {
     expect((await prisma.repository.findUniqueOrThrow({ where: { id: enabled.body.repo.id } })).webhookId).toBeNull();
   });
 });
+
+describe("folder settings", () => {
+  async function monorepo() {
+    return prisma.repository.create({
+      data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/mono", externalId: "20", defaultBranch: "main", followGlobal: false },
+    });
+  }
+
+  it("saves the whole list normalised, and returns it with the repository", async () => {
+    const repo = await monorepo();
+
+    const res = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ directories: [{ path: "./services/billing/", settings: { profile: "strict" } }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.repo.directories).toEqual([{ path: "services/billing", settings: { profile: "strict" } }]);
+
+    const cleared = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ directories: [] });
+    expect(cleared.body.repo.directories).toEqual([]);
+  });
+
+  it("refuses nested folders, folder rules that clash, and unknown connections", async () => {
+    const repo = await monorepo();
+    const send = (directories: unknown) => request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ directories });
+
+    const nested = await send([{ path: "services", settings: {} }, { path: "services/billing", settings: {} }]);
+    expect(nested.status).toBe(400);
+    expect(JSON.stringify(nested.body.errors.directories)).toMatch(/cannot be inside one another/);
+
+    await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: [{ id: "own", description: "Own.", severity: "minor" }] } });
+    const clash = await send([{ path: "web", settings: { rules: [{ id: "own", description: "Weaker.", severity: "info" }] } }]);
+    expect(clash.status).toBe(400);
+    expect(clash.body.errors.directories).toEqual([
+      "web: Rule own in the folder settings was ignored: a rule with that id is already set in the repository settings",
+    ]);
+
+    const connection = await send([{ path: "web", settings: { llm: { connection: "anthropic" } } }]);
+    expect(connection.status).toBe(400);
+  });
+
+  it("shows a folder's effective config, and 404s for one not saved", async () => {
+    const repo = await monorepo();
+    await prisma.repository.update({
+      where: { id: repo.id },
+      data: { settings: { review: { maxFindings: 10 } }, directories: [{ path: "web", settings: { review: { minConfidence: 0.8 } } }] },
+    });
+    vi.stubGlobal("fetch", fetchStub([{ url: /\/repository\/files\//, status: 404, body: "" }]).fetch);
+
+    const res = await request(app).get(`/api/repos/${repo.id}/config?directory=web`).set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.directory).toBe("web");
+    expect(res.body.config.review).toMatchObject({ maxFindings: 10, minConfidence: 0.8 });
+    expect(res.body.sources["review.minConfidence"]).toBe("directory");
+
+    const repoOnly = await request(app).get(`/api/repos/${repo.id}/config`).set("Cookie", cookie);
+    expect(repoOnly.body.directory).toBeNull();
+
+    const missing = await request(app).get(`/api/repos/${repo.id}/config?directory=api`).set("Cookie", cookie);
+    expect(missing.status).toBe(404);
+  });
+});

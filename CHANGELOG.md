@@ -10,6 +10,17 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Folder settings for monorepos. On the Review settings page a repository can
+  have folders (`repositories.directories`) with settings of their own, edited
+  like the repository's and inheriting from them. A review uses a folder only
+  when every file the change touches (ignored files aside) is inside it;
+  otherwise the repository settings apply. The folder layer sits between the
+  repository settings and `.sentryward.yaml`, can only add rules (held like
+  other dashboard rules), and is ignored while the repository follows the
+  global config. Folders cannot be inside one another. The folder a review
+  used is stored in `resolvedConfig.directory` and shown on the review page,
+  and replies to a finding follow it. `PATCH /api/repos/:id` accepts
+  `directories` and `GET /api/repos/:id/config` takes `?directory=`.
 - Monthly spend alerts. Workspace admins can set a monthly budget in USD
   (`workspaces.monthly_budget_usd`) under **Prices and budget** on the LLM
   Connections page (the tab was **Model prices**). It only notifies: reviews

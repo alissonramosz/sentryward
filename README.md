@@ -55,6 +55,7 @@ statuses. The dashboard tracks reviews and findings across runs.
   [automatic reviews](#automatic-reviews) ·
   [notifications](#notifications)
 - **[Review configuration](#review-configuration):**
+  [Folder settings](#folder-settings) ·
   [LLM connections](#llm-connections-and-custom-endpoints) ·
   [model prices and benchmarks](#model-prices-and-benchmarks) ·
   [monthly budget](#monthly-budget) ·
@@ -136,8 +137,8 @@ flowchart LR
 2. The `worker` container claims the job from the `review_jobs` table and
    fetches the PR/MR from the forge.
 3. It resolves the [review configuration](#review-configuration): trigger
-   overrides, then `.sentryward.yaml` at the base revision, repository settings,
-   the global config, the profile, and built-in defaults.
+   overrides, then `.sentryward.yaml` at the base revision, folder settings,
+   repository settings, the global config, the profile, and built-in defaults.
 4. It sends the diff to the configured model in one or more passes, plus an
    optional walkthrough.
 5. It validates the findings, drops those whose stated fact the repository
@@ -1315,16 +1316,44 @@ Settings resolve in this order, highest first:
 2. `.sentryward.yaml` (or `.sentryward.yml`; the first found wins, they are not
    merged) in the repository, read from the PR's **base** revision so a change
    cannot loosen its own review
-3. Repository settings saved in the dashboard (ignored while the repository
+3. [Folder settings](#folder-settings) saved in the dashboard, when every
+   file the change touches is inside that one folder
+4. Repository settings saved in the dashboard (ignored while the repository
    follows the global config, which is the default for new repositories)
-4. The global config saved on the Review settings page, shared by all of a
+5. The global config saved on the Review settings page, shared by all of a
    user's repositories
-5. The selected profile: `balanced` (default), `fast`, `strict`, `security`
-6. Built-in defaults
+6. The selected profile: `balanced` (default), `fast`, `strict`, `security`
+7. Built-in defaults
 
 A field set explicitly in any layer beats the profile. An invalid repository
 file is ignored as a whole and reported as a warning; the review still runs. The
 file cannot hold API keys, tokens or endpoints.
+
+### Folder settings
+
+In a monorepo, folders can have settings of their own: on the Review settings
+page, pick the repository, then **Add folder** under **Folder**. A folder's
+settings are edited like a repository's and inherit any field they leave unset
+from it.
+
+A review uses at most one folder, so it stays predictable:
+
+- The folder applies only when every file the change touches is inside it (for
+  a move, both the old and the new path). A change that also touches the
+  repository root or a second folder uses the repository settings.
+- Files that `ignore_paths` leaves out (from every layer but the folder, which
+  is not chosen yet) do not count, so a lockfile beside the folder does not
+  pull the change out of it.
+- Folders are plain paths from the repository root, without wildcards, and
+  cannot be inside one another.
+- Folders belong to the repository settings: a repository that follows the
+  global config ignores them too (they are kept).
+- Like the other dashboard layers, a folder can only add rules, its rules are
+  held to the dashboard thresholds, and saving one whose rules clash is
+  refused.
+
+The review page shows which folder a review used, as does `resolvedConfig.directory`
+on the job. Replies to a finding use the folder of the review that raised it.
 
 ### LLM connections and custom endpoints
 
@@ -1979,8 +2008,8 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/repos/last-reviews` | `{ lastReviews }`, each added repository's newest run that wasn't skipped or superseded, by repository id; repositories with none are left out |
 | PUT    | `/api/repos/order` | Admins: `{ ids }`, every added repository in the workspace in the order to show them; 409 if the set has changed |
 | POST   | `/api/repos` | `{ connectionId, externalId }`, enables a repository for review |
-| PATCH  | `/api/repos/:id` | `{ enabled?, settings?, followGlobal? }`; `settings` replaces the saved review overrides, `followGlobal` makes the repository ignore them and use only the global config |
-| GET    | `/api/repos/:id/config` | The effective review config for the default branch, where each value came from, and any repository-file warnings |
+| PATCH  | `/api/repos/:id` | `{ enabled?, settings?, directories?, followGlobal? }`; `settings` replaces the saved review overrides, `directories` the list of [folders](#folder-settings) (`[{ path, settings }]`), `followGlobal` makes the repository ignore both and use only the global config |
+| GET    | `/api/repos/:id/config?directory=` | The effective review config for the default branch, where each value came from, and any repository-file warnings; with `directory`, for a change inside only that folder (404 if it is not saved) |
 
 </details>
 

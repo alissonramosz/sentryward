@@ -385,6 +385,61 @@ export const dashboardOverrideSchema = configOverrideSchema.extend({
 });
 export type DashboardOverride = z.infer<typeof dashboardOverrideSchema>;
 
+// Folders of a monorepo with settings of their own, saved in the dashboard
+// next to the repository settings. A review uses at most one of them (see
+// directories.ts), so folders must not nest: with one inside another, a change
+// to the inner one would sit in both.
+export const MAX_DIRECTORIES = 50;
+const MAX_DIRECTORY_CHARS = 300;
+
+// Paths are plain folders relative to the repository root, compared by prefix,
+// so glob characters and parent references are refused rather than half-read.
+export function normalizeDirectory(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^(\.\/)+/, "")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\/{2,}/g, "/");
+}
+
+const directoryPathSchema = z
+  .string()
+  .transform(normalizeDirectory)
+  .pipe(
+    z
+      .string()
+      .min(1, "Enter a folder path")
+      .max(MAX_DIRECTORY_CHARS, `Use at most ${MAX_DIRECTORY_CHARS} characters`)
+      .refine((path) => !/[*?[\]{}\0]/.test(path), "Enter a folder path, not a pattern")
+      .refine((path) => !path.split("/").some((part) => part === "." || part === ".."), "Use a path inside the repository"),
+  );
+
+// True when `inner` is `outer` or a folder below it.
+export function directoryContains(outer: string, inner: string): boolean {
+  return inner === outer || inner.startsWith(`${outer}/`);
+}
+
+export const directorySettingsSchema = z
+  .array(z.strictObject({ path: directoryPathSchema, settings: dashboardOverrideSchema }))
+  .max(MAX_DIRECTORIES, `Use at most ${MAX_DIRECTORIES} folders`)
+  .superRefine((dirs, ctx) => {
+    dirs.forEach((dir, i) => {
+      const other = dirs.findIndex((o, j) => j < i && (directoryContains(o.path, dir.path) || directoryContains(dir.path, o.path)));
+      if (other === -1) return;
+      ctx.addIssue({
+        code: "custom",
+        path: [i, "path"],
+        message:
+          dirs[other]!.path === dir.path
+            ? `${dir.path} is already configured`
+            : `${dir.path} overlaps ${dirs[other]!.path}; folders cannot be inside one another`,
+      });
+    });
+  });
+export type DirectorySettings = z.infer<typeof directorySettingsSchema>;
+export type DirectorySetting = DirectorySettings[number];
+
 export const DEFAULT_CONFIG: Config = {
   version: 1,
   profile: "balanced",

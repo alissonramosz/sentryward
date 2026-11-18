@@ -50,12 +50,18 @@ function globalConfigBody(saved: unknown) {
 async function repositoryRuleWarnings(workspaceId: string, globalSettings: unknown): Promise<string[]> {
   const repos = await prisma.repository.findMany({
     where: { connection: { workspaceId }, followGlobal: false },
-    select: { fullPath: true, settings: true },
+    select: { fullPath: true, settings: true, directories: true },
   });
+  const hasRules = (settings: unknown) => {
+    const rules = (settings as { rules?: unknown[] } | null)?.rules;
+    return Array.isArray(rules) && rules.length > 0;
+  };
   return repos.flatMap((repo) => {
-    const rules = (repo.settings as { rules?: unknown[] } | null)?.rules;
-    if (!Array.isArray(rules) || !rules.length) return [];
-    return repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings }).map((issue) => `${repo.fullPath}: ${issue.message}`);
+    const directories = Array.isArray(repo.directories) ? (repo.directories as { settings?: unknown }[]) : [];
+    if (!hasRules(repo.settings) && !directories.some((dir) => hasRules(dir?.settings))) return [];
+    return repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
+      (issue) => `${repo.fullPath}: ${issue.message}`,
+    );
   });
 }
 
