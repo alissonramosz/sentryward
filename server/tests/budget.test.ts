@@ -29,7 +29,13 @@ describe("dueAlert", () => {
 
   it("announces only the highest of the thresholds crossed at once", () => {
     expect(dueAlert(9.5, 10, [])).toEqual({ announce: 90 });
-    expect(dueAlert(11, 10, [50])).toEqual({ announce: 110 });
+    expect(dueAlert(11.5, 10, [50])).toEqual({ announce: 110 });
+  });
+
+  it("announces the over-budget alert only once spend passes 110%", () => {
+    expect(dueAlert(11, 10, [])).toEqual({ announce: 100 });
+    expect(dueAlert(11, 10, [100])).toEqual({ announce: null });
+    expect(dueAlert(11.01, 10, [100])).toEqual({ announce: 110 });
   });
 
   it("treats the highest threshold sent as covering the ones below it", () => {

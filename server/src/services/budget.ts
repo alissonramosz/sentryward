@@ -61,9 +61,13 @@ export function percentOf(spend: number, budget: number): number {
   return budget > 0 ? Math.floor((spend / budget) * 100) : 0;
 }
 
-// Whether a month's spend has reached a percentage of the budget.
+// Whether a month's spend has crossed a percentage of the budget: reached,
+// for the ordinary thresholds; passed, for the over-budget alert, which is
+// about running past the budget rather than landing on a figure.
 export function crossed(spend: number, budget: number, threshold: number): boolean {
-  return budget > 0 && spend * 100 >= threshold * budget;
+  if (budget <= 0) return false;
+  const scaled = spend * 100;
+  return threshold === OVER_BUDGET_PERCENT ? scaled > threshold * budget : scaled >= threshold * budget;
 }
 
 // The threshold to announce: the highest the month's spend has crossed, when
