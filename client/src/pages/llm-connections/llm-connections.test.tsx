@@ -61,7 +61,7 @@ describe("LLM Connections page", () => {
     expect(screen.queryByRole("tab", { name: "Profile" })).not.toBeInTheDocument()
   })
 
-  it("keeps model prices on their own tab", async () => {
+  it("keeps model prices and the budget on their own tab", async () => {
     mockApi({
       "GET /api/settings/api-keys": noKeys,
       "GET /api/settings/model-prices": {
@@ -74,7 +74,7 @@ describe("LLM Connections page", () => {
     expect(await screen.findByRole("list", { name: "LLM providers" })).toBeInTheDocument()
     expect(screen.queryByRole("table", { name: "Model prices" })).not.toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole("tab", { name: "Model prices" }))
+    await userEvent.click(screen.getByRole("tab", { name: "Prices and budget" }))
 
     expect(await screen.findByRole("table", { name: "Model prices" })).toBeInTheDocument()
     expect(screen.queryByRole("list", { name: "LLM providers" })).not.toBeInTheDocument()

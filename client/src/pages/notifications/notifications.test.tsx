@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { screen, within } from "@testing-library/react"
+import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { App } from "@/App"
 import { jsonResponse, renderWithProviders } from "@/test/renderWithProviders"
@@ -129,6 +129,32 @@ describe("Notifications", () => {
       onlyVerdictChanges: false,
       delivery: { mode: "each" },
     })
+  })
+
+  it("adds a target for budget alerts only", async () => {
+    let created = false
+    const fetchSpy = mockApi({
+      "GET /api/notifications": () => jsonResponse(200, { targets: created ? [webhook] : [], mailConfigured: false, settings }),
+      "POST /api/notifications": () => {
+        created = true
+        return jsonResponse(201, { target: webhook, secret: "abc123" })
+      },
+      [MEMBERS_ROUTE]: members,
+    })
+    renderWithProviders(<App />, { route: "/notifications" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add target" }))
+    const sheet = await screen.findByRole("dialog")
+    await userEvent.type(within(sheet).getByLabelText("Name"), "Finance")
+    await userEvent.type(within(sheet).getByLabelText("URL"), "https://ci.example.com/hook")
+    await userEvent.click(within(sheet).getByRole("checkbox", { name: "Blocked" }))
+    await userEvent.click(within(sheet).getByRole("checkbox", { name: "Failed" }))
+    await userEvent.click(within(sheet).getByRole("checkbox", { name: "Budget" }))
+    await userEvent.click(within(sheet).getByRole("button", { name: "Add target" }))
+
+    await waitFor(() => expect(calls(fetchSpy, "POST", "/api/notifications")).toHaveLength(1))
+    const [, init] = calls(fetchSpy, "POST", "/api/notifications")[0]!
+    expect(JSON.parse(String(init?.body)).events).toEqual(["budget"])
   })
 
   it("adds a Google Chat target with its incoming webhook URL and no secret", async () => {

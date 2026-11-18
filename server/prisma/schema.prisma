@@ -78,6 +78,9 @@ model Workspace {
   // Notification targets are paused after this many deliveries in a row fail
   // for good (retries exhausted or refused); 0 never pauses them.
   notifyAutoPauseAfter Int  @default(5) @map("notify_auto_pause_after")
+  // USD per UTC calendar month; null is no budget. Only notifies: reviews
+  // never stop over it (worker/budgetAlerts.ts).
+  monthlyBudgetUsd Float?   @map("monthly_budget_usd")
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -92,6 +95,7 @@ model Workspace {
   notifications   NotificationTarget[]
   privacy         WorkspacePrivacy?
   llmRequestLogs  LlmRequestLog[]
+  budgetAlerts    BudgetAlert[]
 
   @@map("workspaces")
 }
@@ -843,8 +847,33 @@ enum NotificationEvent {
   // Not blocked, after the previous finished review of the same change was.
   resolved
   completed
+  // The workspace's month's spend crossed a budget threshold. Not about a
+  // review, so a target's repository, severity and digest settings ignore it.
+  budget
 
   @@map("notification_event")
+}
+
+// A budget threshold announced for a workspace's month: at most one row per
+// threshold and month, so each alert goes out once. Thresholds crossed
+// together are all recorded and only the highest is announced.
+model BudgetAlert {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  // The first instant of the UTC month.
+  month       DateTime @db.Timestamptz
+  // A percentage of the budget: 50, 75, 90, 100, or 110 for over budget.
+  threshold   Int
+  // What the month had spent and the budget then, as announced.
+  spendUsd    Float    @map("spend_usd")
+  budgetUsd   Float    @map("budget_usd")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, month, threshold])
+  @@index([createdAt])
+  @@map("budget_alerts")
 }
 
 // How a target receives reviews: one message each, or a digest of the

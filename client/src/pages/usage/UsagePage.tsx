@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/PageHeader"
 import { PageShell } from "@/components/PageShell"
 import { Alert, AlertTitle } from "@/components/ui/alert"
 import { Skeleton } from "@/components/ui/skeleton"
+import { MonthBudget } from "@/features/budget/BudgetMeter"
 import { useUsage } from "@/features/usage/api"
 import { BreakdownChart } from "@/features/usage/BreakdownChart"
 import { OverviewCards } from "@/features/usage/OverviewCards"
@@ -59,6 +60,7 @@ export function UsagePage() {
         </Alert>
       ) : (
         <>
+          <MonthBudget />
           <OverviewCards totals={data.totals} />
           <UsageChart report={data} />
           <div className="grid gap-4 lg:grid-cols-2">

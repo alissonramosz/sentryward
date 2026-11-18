@@ -31,6 +31,7 @@ const DELIVERY_EVENT_LABELS: Record<DeliveryEvent, string> = {
   completed: "Completed",
   test: "Test",
   digest: "Digest",
+  budget: "Budget",
 }
 
 const OUTCOME_COLORS: Record<LastDelivery["status"], string> = {

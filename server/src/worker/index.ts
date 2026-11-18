@@ -10,6 +10,7 @@ import { executeReply } from "./executeReply.ts";
 import { runRetention } from "./retention.ts";
 import { sweepClosedChanges } from "./backlogSweep.ts";
 import { applyPendingMerges } from "../services/backlog.ts";
+import { runBudgetAlerts } from "./budgetAlerts.ts";
 
 let stopping = false;
 const running = new Set<Promise<void>>();
@@ -33,6 +34,10 @@ let lastSweepAt = 0;
 // merged change reaches the backlog within about this long of its last review.
 const BACKLOG_APPLY_INTERVAL_MS = 30 * 1000;
 let lastApplyAt = 0;
+// A month's spend moves with each finished review; a few minutes' delay on a
+// budget alert is fine, and each pass reads every budgeted workspace's month.
+const BUDGET_INTERVAL_MS = 5 * 60 * 1000;
+let lastBudgetAt = 0;
 
 // Claims are awaited one at a time; the work itself runs in the background up
 // to WORKER_CONCURRENCY jobs. Replies to inline threads share the slots and
@@ -99,14 +104,23 @@ async function prune(): Promise<void> {
   // retrying every poll.
   lastPruneAt = Date.now();
   const r = await runRetention();
-  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries || r.backlogItems || r.backlogScrubbed) {
+  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries || r.backlogItems || r.backlogScrubbed || r.budgetAlerts) {
     console.log(
       `[worker] retention: deleted ${r.deleted} job(s), expired ${r.trimmed} result(s), ` +
         `purged ${r.changes} change(s) (${r.findings} finding(s), ${r.replies} reply(ies)), ` +
         `${r.auditRows} audit row(s), ${r.deliveries} notification delivery(ies), ${r.backlogItems} backlog item(s), ` +
-        `scrubbed ${r.backlogScrubbed} dismissed backlog item(s)`,
+        `scrubbed ${r.backlogScrubbed} dismissed backlog item(s), ${r.budgetAlerts} budget alert(s)`,
     );
   }
+}
+
+// Announces newly crossed budget thresholds (budgetAlerts.ts). Like prune, the
+// time is set first so a failing pass waits for the next interval.
+async function checkBudgets(): Promise<void> {
+  if (Date.now() - lastBudgetAt < BUDGET_INTERVAL_MS) return;
+  lastBudgetAt = Date.now();
+  const announced = await runBudgetAlerts();
+  if (announced) console.log(`[worker] queued ${announced} budget alert(s)`);
 }
 
 // Applies recorded merges to the backlog (backlog.ts). Like prune, the time is
@@ -182,12 +196,18 @@ async function loop(): Promise<void> {
     } catch (err) {
       console.error("[worker] poll failed", err);
     }
-    // Before dispatch, so a digest queued here goes out in the same pass.
+    // Before dispatch, so a digest or budget alert queued here goes out in
+    // the same pass.
     try {
       const digests = await runDueDigests();
       if (digests > 0) console.log(`[worker] queued ${digests} notification digest(s)`);
     } catch (err) {
       console.error("[worker] notification digests failed", err);
+    }
+    try {
+      await checkBudgets();
+    } catch (err) {
+      console.error("[worker] budget alerts failed", err);
     }
     try {
       await dispatchDeliveries();

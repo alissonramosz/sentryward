@@ -288,6 +288,7 @@ export interface RetentionResult extends PruneResult, PurgeResult {
   deliveries: number;
   backlogItems: number;
   backlogScrubbed: number;
+  budgetAlerts: number;
 }
 
 // The delivery log answers "is this target working", so recent rows are all it
@@ -295,6 +296,12 @@ export interface RetentionResult extends PruneResult, PurgeResult {
 // workspace whose privacy retention is shorter keeps its log for that long
 // instead, since a delivery row describes a review that is already gone.
 export const DELIVERY_RETENTION_DAYS = 30;
+// Budget alert rows only matter for their own month (each threshold is
+// announced once a month); a year and a bit leaves the card's history and a
+// year-on-year look. They hold no change content, so privacy retention does
+// not shorten them, and a shorter period would let a month announce a
+// threshold twice.
+export const BUDGET_ALERT_RETENTION_DAYS = 400;
 export const DELIVERIES_PER_TARGET = 100;
 
 // Deletes deliveries older than `days`, a batch at a time like pruneReviews.
@@ -370,6 +377,7 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     deliveries: 0,
     backlogItems: 0,
     backlogScrubbed: 0,
+    budgetAlerts: 0,
   };
   for (const [days, workspaceIds] of byDays) {
     const pruned = await pruneReviews(days, { now, workspaceIds });
@@ -406,5 +414,10 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
   result.oauthStates += (await prisma.signInState.deleteMany({ where: expired })).count;
   result.oauthStates += (await prisma.oAuthState.deleteMany({ where: expired })).count;
   result.deliveries += await pruneDeliveries(DELIVERY_RETENTION_DAYS, { now });
+  result.budgetAlerts += (
+    await prisma.budgetAlert.deleteMany({
+      where: { createdAt: { lt: new Date(now.getTime() - BUDGET_ALERT_RETENTION_DAYS * DAY_MS) } },
+    })
+  ).count;
   return result;
 }

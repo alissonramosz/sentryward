@@ -57,6 +57,7 @@ statuses. The dashboard tracks reviews and findings across runs.
 - **[Review configuration](#review-configuration):**
   [LLM connections](#llm-connections-and-custom-endpoints) ·
   [model prices and benchmarks](#model-prices-and-benchmarks) ·
+  [monthly budget](#monthly-budget) ·
   [model capabilities](#model-capabilities) ·
   [thinking and agentic context](#thinking-and-agentic-context) ·
   [Ollama](#ollama) ·
@@ -959,6 +960,7 @@ events:
 | **Resolved** | The review passed, and the previous finished review of the same pull or merge request was blocked. A partial review with no blocking findings does not count, since it may have skipped the code the blockers were in |
 | **Failed** | The review could not run or finish (no model key, the forge unreachable, the maximum run time or a worker that stopped responding) |
 | **Completed** | Any finished review, blocked or not. Skipped and cancelled reviews never notify |
+| **Budget** | This month's spend reached 50, 75, 90 or 100% of the workspace's [monthly budget](#monthly-budget), or passed 110% (over budget). Not about a review: the target's scope and digest settings don't apply, and it is sent at once |
 
 A target gets one delivery per review, named after the most specific event it
 listens for (failed, then blocked, then resolved, then completed).
@@ -1125,7 +1127,7 @@ There are six kinds:
 
   Receivers that check `X-Sentryward-Signature` (body only) keep working for
   this release; move them to `X-Sentryward-Signature-V2` before it is removed. `event` (and the header) is `failed`, `blocked`,
-  `resolved`, `completed`, `test` or `digest`. A digest carries the period's
+  `resolved`, `completed`, `test`, `digest` or `budget`. A digest carries the period's
   reviews, each in the shape above:
 
   ```json
@@ -1144,6 +1146,29 @@ There are six kinds:
 
   `schedule` is `daily`, `weekly`, or `null` for the final digest sent after a
   target switches back to each review.
+
+  A budget alert has its own shape. `threshold` is the percentage announced
+  (50, 75, 90, 100, or 110 with `overBudget: true`), `percent` the spend's
+  share of the budget when it was queued, and `unpricedCalls` the month's
+  calls no price was known for (left out of `spendUsd`):
+
+  ```json
+  {
+    "event": "budget",
+    "workspace": { "id": "...", "name": "Acme" },
+    "month": "2026-11",
+    "threshold": 90,
+    "overBudget": false,
+    "spendUsd": 92.4,
+    "budgetUsd": 100,
+    "percent": 92,
+    "unpricedCalls": 0,
+    "url": "https://sentryward.example.com/usage"
+  }
+  ```
+
+  Slack, Google Chat, Discord, Teams and email targets get a short message
+  with the same figures and a **View usage** link.
 - **Slack**: an incoming-webhook URL, posted a Block Kit message: a headline
   with an emoji per event ("🔴 Review blocked · acme/api #42"; also "⚠️ Review
   failed", "✅ Blocking issues resolved", "🟢 Review completed" and "🔔 Test
@@ -1257,7 +1282,9 @@ target removes its log.
 Any member, admin or not, can switch on email about reviews of the pull and
 merge requests they opened, in the **Your pull requests** card at the top of
 the Notifications page, and pick which events (blocked, failed, resolved,
-completed; failed, blocked and resolved by default). It needs mail configured.
+completed; failed, blocked and resolved by default). Budget alerts are about
+the workspace, not your changes, so they are not offered here. It needs mail
+configured.
 The setting is per workspace and visible only to that member: personal
 targets never appear among the workspace's targets, admins cannot edit or
 test them, and leaving the workspace deletes them.
@@ -1334,7 +1361,7 @@ quota.
 Review costs are estimates worked out when a review runs, from a built-in price
 table.
 
-**Custom prices.** Under **Model prices** on the LLM Connections page,
+**Custom prices.** Under **Prices and budget** on the LLM Connections page,
 workspace admins can set their own price for a model (USD per million tokens for
 input and output, optionally cache reads, cache writes and reasoning).
 
@@ -1363,6 +1390,38 @@ Confirmed and false-positive rates are over decided findings (confirmed plus
 false positives), as in the findings calibration stats, so findings still open
 don't count against a model. Cost per review is over the reviews that called a
 model.
+
+### Monthly budget
+
+Workspace admins can set a monthly budget in USD under **Prices and budget**
+on the LLM Connections page. It only notifies: reviews never stop or slow down
+because of it.
+
+- **What counts:** the spend is this calendar month's (UTC) estimated review
+  cost, summed from the costs reviews recorded when they ran, the same figures
+  as the Usage page. Superseded, skipped and cancelled reviews don't count, and
+  neither do replies to findings.
+- **Alerts:** at 50, 75, 90 and 100% of the budget, and an over-budget alert
+  once the spend passes 110%. Each goes out at most once a month. When several
+  thresholds are crossed at once (a budget set mid-month, or one costly
+  review), only the highest is sent and the lower ones count as sent. Raising
+  the budget mid-month never repeats an alert; lowering it can send the next
+  one up. A new month starts over.
+- **Where alerts go:** to every active workspace notification target with the
+  **Budget** event (see [Notifications](#notifications)), and, when mail is
+  configured, by email to the workspace's owners and admins. An admin already
+  on an email target with the Budget event is not mailed twice. The worker
+  checks every 5 minutes.
+- **Prices first:** a budget can only be switched on once every model the
+  workspace's reviews called in the last 90 days has a price (built-in or the
+  workspace's own), since an unpriced call adds nothing to the spend. If a
+  review later calls an unpriced model, alerts keep running, and the card and
+  each alert say how many calls the spend leaves out.
+
+The card shows the spend against the budget, the alerts sent this month and
+the models still unpriced, and warns when no target listens for budget alerts.
+The Usage page shows the same meter (always for the current month, whatever
+period the page shows) when a budget is set.
 
 ### Model capabilities
 
@@ -1672,8 +1731,10 @@ that limit both.
 - **Credentials**: forge tokens, GitHub App installations, LLM API keys and
   notification URLs, encrypted with `ENCRYPTION_KEY` (AES-256-GCM). Only the
   last four characters of a key are ever shown.
-- **Model capabilities and prices** per workspace, users, memberships, invites
-  and API tokens (only hashes of invite, reset and API tokens are kept).
+- **Model capabilities and prices** per workspace, the monthly budget and the
+  budget alerts sent (`budget_alerts`: month, threshold, spend and budget),
+  users, memberships, invites and API tokens (only hashes of invite, reset and
+  API tokens are kept).
 - **The audit log** of outbound model requests (see [Audit log](#audit-log)).
 
 ### What leaves the server
@@ -1744,6 +1805,9 @@ Once an hour the worker:
   longer ago than the period are scrubbed rather than deleted: their title,
   file, author and notes are cleared and they leave the Backlog page, but the
   dismissal still holds if the same problem ships again.
+- **Deletes budget alert records** older than 400 days, whatever the privacy
+  retention: they hold no change content, and a shorter period could let a
+  month announce the same threshold twice.
 - **Deletes audit log entries** older than the instance's **audit log
   retention** (empty keeps them forever). Only instance admins set this, so a
   workspace cannot erase its own trail.
@@ -2043,6 +2107,8 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/settings/model-prices/lookup?model=` | `{ model, price, builtIn }`: the price a review of `model` gets now (workspace prices included) and its built-in price; `null` when unknown |
 | PUT    | `/api/settings/model-prices` | Workspace admins: `{ model, input, output, cached?, cacheWrite?, reasoning? }`, saves (or replaces) the price for `model`; applies to reviews from then on |
 | DELETE | `/api/settings/model-prices/:id` | Workspace admins: removes a price |
+| GET    | `/api/settings/budget` | The monthly budget and this month's spend (see below) |
+| PUT    | `/api/settings/budget` | Workspace admins: `{ monthlyBudgetUsd }`, a positive amount up to 1,000,000, or `null` to remove the budget; 400 when switching one on while a model used in the last 90 days has no price |
 
 - `POST .../test` returns `{ result }` with latency and token usage, or
   `ok: false` with a `reason` (`revoked`, `model`, `unreachable`, `output`) and
@@ -2059,6 +2125,13 @@ rate limited (20 requests per 15 minutes per IP).
   (USD per million tokens); `models` are those its reviews called in the last 90
   days with their built-in price and the price reviews get now, workspace prices
   included (`builtIn`, `price`; `null` when unknown).
+- `GET /api/settings/budget`: `{ monthlyBudgetUsd, month, spendUsd, percent,
+  unpricedCalls, unpricedModels, alertsSent, budgetTargets, adminEmail }`.
+  `monthlyBudgetUsd` and `percent` are `null` with no budget; `month` is the
+  current UTC month (`2026-11`); `alertsSent` are `{ threshold, at }` for this
+  month; `budgetTargets` counts active targets listening for the Budget event;
+  `adminEmail` is whether owners and admins are mailed each alert. `PUT`
+  returns the same.
 
 </details>
 

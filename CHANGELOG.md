@@ -10,6 +10,27 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Monthly spend alerts. Workspace admins can set a monthly budget in USD
+  (`workspaces.monthly_budget_usd`) under **Prices and budget** on the LLM
+  Connections page (the tab was **Model prices**). It only notifies: reviews
+  never stop over it. The worker checks every 5 minutes and alerts when the
+  UTC month's estimated review spend (the same figures as the Usage page)
+  reaches 50, 75, 90 and 100% of the budget, and when it passes 110% (over
+  budget), each at most once a month (`budget_alerts`, a new table, records
+  them). Thresholds crossed together send one alert, for the highest. Alerts go
+  to workspace targets with the new **Budget** event (`budget` in
+  `notification_event`; personal targets don't offer it), at once whatever
+  the target's scope or digest schedule, through the usual outbox, and by email
+  to owners and admins when mail is configured (skipping anyone an email target
+  with the event already reaches). Webhooks get a `budget` body with the month,
+  threshold, spend, budget and unpriced calls; Slack, Google Chat, Discord,
+  Teams and email get a short message with a **View usage** link. A budget can
+  only be switched on once every model used in the last 90 days has a price.
+  The budget card shows this month's spend against the budget, the alerts sent,
+  the models still unpriced and a warning when no target listens. The Usage
+  page shows the same meter when a budget is set. New endpoints:
+  `GET /api/settings/budget` and `PUT /api/settings/budget` (admins).
+  Retention deletes alert records after 400 days.
 - A backlog of findings that shipped. When a pull or merge request merges,
   its findings that were still open, or ignored as "fix later", become
   repository-level backlog items (`backlog_items`, a new table) that outlive

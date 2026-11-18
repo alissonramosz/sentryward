@@ -16,9 +16,13 @@ export function errorMessage(error: unknown, fallback: string) {
 }
 
 export type NotificationKind = "webhook" | "slack" | "google_chat" | "discord" | "teams" | "email"
-export type NotificationEvent = "blocked" | "failed" | "resolved" | "completed"
+// What a review can be. Personal notifications take only these.
+export type ReviewEvent = "blocked" | "failed" | "resolved" | "completed"
+// Budget alerts are about the workspace's month, not a review, so a target's
+// repository, severity and digest settings do not apply to them.
+export type NotificationEvent = ReviewEvent | "budget"
 
-export const EVENT_OPTIONS: { value: NotificationEvent; label: string; description: string }[] = [
+export const REVIEW_EVENT_OPTIONS: { value: ReviewEvent; label: string; description: string }[] = [
   { value: "blocked", label: "Blocked", description: "A review found blocking issues" },
   {
     value: "resolved",
@@ -27,6 +31,15 @@ export const EVENT_OPTIONS: { value: NotificationEvent; label: string; descripti
   },
   { value: "failed", label: "Failed", description: "A review could not run or finish" },
   { value: "completed", label: "Completed", description: "Any finished review, blocked or not" },
+]
+
+export const EVENT_OPTIONS: { value: NotificationEvent; label: string; description: string }[] = [
+  ...REVIEW_EVENT_OPTIONS,
+  {
+    value: "budget",
+    label: "Budget",
+    description: "This month's spend reaches 50, 75, 90 or 100% of the workspace's budget, or goes over it. Sent at once, whatever the scope or delivery settings",
+  },
 ]
 
 // The least severe finding a review needs for a target to hear about it; null
@@ -287,7 +300,7 @@ export interface PersonalForge {
 
 export interface PersonalNotifications {
   enabled: boolean
-  events: NotificationEvent[]
+  events: ReviewEvent[]
   // Set when repeated failed deliveries paused it; saving clears it.
   pausedReason: string | null
   forges: PersonalForge[]
@@ -304,7 +317,7 @@ export function usePersonalNotifications() {
 export function useUpdatePersonalNotifications() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (input: { enabled: boolean; events: NotificationEvent[] }) =>
+    mutationFn: (input: { enabled: boolean; events: ReviewEvent[] }) =>
       api<PersonalNotifications>("/notifications/personal", { method: "PUT", body: JSON.stringify(input) }),
     onSuccess: (data) => queryClient.setQueryData(PERSONAL_NOTIFICATIONS_KEY, data),
   })
