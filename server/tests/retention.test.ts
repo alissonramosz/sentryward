@@ -212,6 +212,12 @@ async function finding(seenAt: Date, overrides: Partial<Prisma.FindingUncheckedC
   });
 }
 
+// The backlog sweep asked the forge about the change: without that, a change
+// with open findings is held back from purging (backlog.test.ts covers it).
+function checked(number = 7) {
+  return prisma.changeState.create({ data: { repositoryId: repoId, number, state: "open", checkedAt: NOW } });
+}
+
 async function threadReply(createdAt: Date, status: "done" | "queued" = "done", repositoryId = repoId) {
   return prisma.threadReply.create({
     data: {
@@ -249,6 +255,7 @@ describe("purgeStaleChanges", () => {
       data: { repositoryId: repoId, number: 7, fingerprint: "fp", forgeCommentId: "1", createdAt: OLD },
     });
     await threadReply(OLD);
+    await checked();
 
     const purged = await purgeStaleChanges(30, { now: NOW, workspaceIds: [workspaceId] });
 
@@ -266,6 +273,8 @@ describe("purgeStaleChanges", () => {
     await finding(OLD, { ignoredAt: RECENT });
     await finding(OLD, { fingerprint: "other", number: 8 });
     await threadReply(RECENT, "done");
+    await checked(7);
+    await checked(8);
 
     const purged = await purgeStaleChanges(30, { now: NOW, workspaceIds: [workspaceId] });
 

@@ -7,7 +7,7 @@ import type { ReviewResult } from "../src/review/core/models.ts";
 import type { ChangeDetails } from "../src/review/forge/types.ts";
 import { backlogTransitions, patchTouches, recordChangeState, type BacklogCandidate } from "../src/services/backlog.ts";
 import { sweepClosedChanges } from "../src/worker/backlogSweep.ts";
-import { pruneBacklog } from "../src/worker/retention.ts";
+import { pruneBacklog, purgeStaleChanges } from "../src/worker/retention.ts";
 import { sampleResult } from "./helpers/result.ts";
 import { createUser } from "./helpers/users.ts";
 
@@ -282,6 +282,29 @@ describe("pruneBacklog", () => {
 
     expect(await pruneBacklog(30)).toBe(2);
     expect((await items()).map((item) => item.fingerprint)).toEqual(["fp-open", "fp-recent"]);
+  });
+});
+
+describe("purgeStaleChanges", () => {
+  it("keeps a quiet change's unaddressed findings until the sweep has checked it", async () => {
+    const old = new Date(Date.now() - 40 * DAY_MS);
+    await finding(7, "fp", { firstSeenAt: old, lastSeenAt: old });
+    const count = () => prisma.finding.count({ where: { repositoryId: repoId, number: 7 } });
+
+    expect((await purgeStaleChanges(30)).changes).toBe(0);
+    expect(await count()).toBe(1);
+    // An open answer from the sweep (or a failed check) is enough.
+    await prisma.changeState.create({ data: { repositoryId: repoId, number: 7, state: "open", checkedAt: new Date() } });
+    expect((await purgeStaleChanges(30)).changes).toBe(1);
+    expect(await count()).toBe(0);
+  });
+
+  it("does not wait for a sweep that will never check the change", async () => {
+    const old = new Date(Date.now() - 40 * DAY_MS);
+    await finding(7, "fp", { firstSeenAt: old, lastSeenAt: old });
+    await prisma.repository.update({ where: { id: repoId }, data: { enabled: false } });
+
+    expect((await purgeStaleChanges(30)).changes).toBe(1);
   });
 });
 

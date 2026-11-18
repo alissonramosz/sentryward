@@ -123,7 +123,12 @@ export interface PurgeResult {
 // findings of a change still under review would lose their ignore state and
 // lifecycle mid-PR. Job rows and summaries stay, so usage and the review list
 // are unchanged. A change revived later is reviewed afresh; the forge's own
-// markers keep inline comments from being posted twice.
+// markers keep inline comments from being posted twice. A change with findings
+// the backlog could still take waits until the backlog sweep has asked the
+// forge whether it merged (a failed check counts, so a broken forge delays it
+// by one check, not for good), unless the sweep never will: the repository is
+// turned off or its access is gone. Otherwise a worker down for longer than the
+// window would purge merges it had not yet seen.
 export async function purgeStaleChanges(
   days: number,
   { now = new Date(), batchSize = 200, workspaceIds }: PruneOptions = {},
@@ -181,6 +186,18 @@ async function staleChanges(cutoff: Date, batchSize: number, workspaceIds?: stri
       AND NOT EXISTS (
         SELECT 1 FROM thread_replies t
         WHERE t.repository_id = c.repository_id AND t.number = c.number AND t.status IN ('queued', 'running')
+      )
+      -- Unaddressed findings the backlog sweep could still promote, on a change
+      -- it has not asked the forge about since they were last seen.
+      AND NOT EXISTS (
+        SELECT 1 FROM findings f
+        JOIN repositories r ON r.id = f.repository_id
+        JOIN forge_connections fc ON fc.id = r.connection_id
+        LEFT JOIN change_states s ON s.repository_id = f.repository_id AND s.number = f.number
+        WHERE f.repository_id = c.repository_id AND f.number = c.number
+          AND (f.state = 'open' OR (f.state = 'ignored' AND f.ignore_reason = 'fix_later'))
+          AND r.enabled AND r.access_lost_at IS NULL AND fc.credentials_rejected_at IS NULL
+          AND (s.id IS NULL OR (s.state <> 'merged' AND s.checked_at < f.last_seen_at))
       )
       AND (
         EXISTS (SELECT 1 FROM findings f WHERE f.repository_id = c.repository_id AND f.number = c.number)

@@ -30,7 +30,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   items by severity and age, for the selected repository), and dismiss (with an optional note) and reopen
   actions, backed by `GET /api/backlog`, `GET /api/backlog/stats`,
   `GET /api/backlog/:id` and `PATCH /api/backlog/:id`. Retention deletes
-  items resolved or dismissed longer ago than the period and keeps open ones.
+  items resolved or dismissed longer ago than the period and keeps open ones,
+  and holds back purging a change's unaddressed findings until the sweep has
+  asked the forge whether it merged (unless the repository is turned off or
+  its access is gone), so a worker outage longer than the period loses no
+  merges.
 - A focus for a single review: `/sentryward review focus on <area>` (or
   `focus: <area>`) asks that run to look hardest at the area named, while
   still reporting real problems elsewhere. The rest of the command's line is

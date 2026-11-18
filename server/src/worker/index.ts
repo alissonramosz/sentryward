@@ -175,15 +175,16 @@ async function loop(): Promise<void> {
     } catch (err) {
       console.error("[worker] notification deliveries failed", err);
     }
-    try {
-      await prune();
-    } catch (err) {
-      console.error("[worker] retention failed", err);
-    }
+    // Sweep first: a merge must reach the backlog while its findings exist.
     try {
       await sweepBacklog();
     } catch (err) {
       console.error("[worker] backlog sweep failed", err);
+    }
+    try {
+      await prune();
+    } catch (err) {
+      console.error("[worker] retention failed", err);
     }
     await new Promise((resolve) => setTimeout(resolve, env.WORKER_POLL_INTERVAL_MS));
   }

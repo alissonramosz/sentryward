@@ -1722,7 +1722,10 @@ Once an hour the worker:
   lose their ignore state mid-review; if a purged change becomes active again it
   is reviewed afresh (the forge's own markers still stop inline comments from
   being posted twice), and benchmark and calibration figures no longer count
-  its findings. Its backlog items stay: they belong to the repository.
+  its findings. Its backlog items stay: they belong to the repository. A
+  change with findings the [backlog](#backlog) could still take waits until
+  the worker has asked the forge whether it merged (a failed check counts),
+  unless its repository is turned off or its access is gone.
 - **Prunes the backlog**: items resolved or dismissed longer ago than the
   period are deleted. Open items are kept until they are resolved or
   dismissed, however old.
