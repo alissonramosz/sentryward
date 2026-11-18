@@ -20,13 +20,14 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   between them) and the finding was not reported again; invalidated when the
   file was deleted or renamed. A resolved item that ships again reopens; a
   dismissed one stays dismissed. Merges arrive from the GitHub and GitLab close
-  webhooks (now acted on whatever `abortOnClose` says), from a review's close
-  watch, and from a worker sweep that asks the forge about quiet changes with
+  webhooks (now acted on whatever `abortOnClose` says), from a review that
+  sees its change merge while it runs (whatever `abortOnClose` says, recorded
+  once the run's findings are stored), and from a worker sweep that asks the forge about quiet changes with
   unaddressed findings every few hours, so a missed webhook is caught before
   retention purges the findings (`change_states`, a new table, records what
   is known). A new **Backlog** page lists items with filters for state,
   origin, severity, category, type, age and repository, a stats strip (open
-  items by severity and age), and dismiss (with an optional note) and reopen
+  items by severity and age, for the selected repository), and dismiss (with an optional note) and reopen
   actions, backed by `GET /api/backlog`, `GET /api/backlog/stats`,
   `GET /api/backlog/:id` and `PATCH /api/backlog/:id`. Retention deletes
   items resolved or dismissed longer ago than the period and keeps open ones.

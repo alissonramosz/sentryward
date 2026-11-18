@@ -5,10 +5,10 @@ import { Stat } from "@/features/reviews/ReviewStatsStrip"
 import { useBacklogStats } from "./api"
 import { AGE_LABEL } from "./options"
 
-// How much shipped unaddressed, and how long it has been waiting. Stays out of
-// the way if it cannot load.
-export function BacklogStatsStrip() {
-  const { data, isPending, isError } = useBacklogStats()
+// How much shipped unaddressed, and how long it has been waiting, for the
+// repository the list is filtered to. Stays out of the way if it cannot load.
+export function BacklogStatsStrip({ repoId }: { repoId?: string }) {
+  const { data, isPending, isError } = useBacklogStats(repoId)
   if (isError) return null
   if (isPending) return <Skeleton className="h-24 w-full" />
 

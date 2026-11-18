@@ -47,10 +47,12 @@ export function useBacklog(params: BacklogQuery = {}) {
 }
 
 // Under the "backlog" key, so dismissing or reopening an item refreshes the cards too.
-export function useBacklogStats() {
+// Workspace-wide unless a repository is given.
+export function useBacklogStats(repoId?: string) {
+  const query = backlogSearch({ repoId })
   return useQuery({
-    queryKey: ["backlog", "stats"],
-    queryFn: () => api<BacklogStats>("/backlog/stats"),
+    queryKey: ["backlog", "stats", repoId ?? null],
+    queryFn: () => api<BacklogStats>(`/backlog/stats${query ? `?${query}` : ""}`),
   })
 }
 

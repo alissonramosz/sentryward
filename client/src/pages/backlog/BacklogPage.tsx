@@ -39,7 +39,7 @@ export function BacklogPage() {
         title="Backlog"
         description="Findings that were still unaddressed when their pull or merge request merged. Later merges that fix them resolve them."
       />
-      <BacklogStatsStrip />
+      <BacklogStatsStrip repoId={filters.params.repoId} />
       <FilterToolbar>
         <ActiveFilterChips filters={filters.activeFilters} />
         <FilterPopover active={filters.filtering} onClear={filters.clearFilters}>

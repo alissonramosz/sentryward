@@ -80,6 +80,18 @@ describe("Backlog page", () => {
     expect(within(row).getByText("Open")).toBeInTheDocument()
   })
 
+  it("counts only the selected repository's items in the stats", async () => {
+    mockApi({
+      "GET /api/backlog/stats": stats,
+      "GET /api/backlog/stats?repoId=repo-1": { ...stats, open: 7 },
+      "GET /api/backlog?repoId=repo-1&state=open&page=1&limit=10": page([item]),
+    })
+    renderWithProviders(<App />, { route: "/backlog?repo=repo-1" })
+
+    const cards = await screen.findByRole("region", { name: "Backlog stats" })
+    expect(within(cards).getByText("Open items").parentElement!.nextSibling).toHaveTextContent("7")
+  })
+
   it("dismisses an item with a note", async () => {
     const patch = vi.fn(() => jsonResponse(200, { item: { ...item, state: "dismissed" } }))
     mockApi({ "GET /api/backlog/stats": stats, [OPEN]: page([item]), "PATCH /api/backlog/b-1": patch })
