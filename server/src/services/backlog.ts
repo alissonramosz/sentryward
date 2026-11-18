@@ -213,8 +213,10 @@ export async function recordChangeState(input: ChangeStateInput): Promise<MergeO
         continue;
       } else {
         // Open: the same problem shipped again, refreshed. Resolved: it is back.
-        await tx.backlogItem.update({
-          where: { id: item.id },
+        // The dismiss route does not hold the backlog lock, so a dismissal can
+        // land after the read above: the write checks again.
+        const { count } = await tx.backlogItem.updateMany({
+          where: { id: item.id, state: { not: "dismissed" } },
           data: {
             ...snapshot,
             state: "open",
@@ -224,6 +226,7 @@ export async function recordChangeState(input: ChangeStateInput): Promise<MergeO
             resolvedAt: null,
           },
         });
+        if (!count) continue;
       }
       promoted++;
     }

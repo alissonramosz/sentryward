@@ -1,5 +1,5 @@
 import request from "supertest";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import type { Prisma } from "../src/generated/prisma/client.ts";
@@ -213,6 +213,38 @@ describe("recordChangeState", () => {
     const [back, dismissed] = await items();
     expect(back).toMatchObject({ state: "open", resolution: null, sourceNumber: 9 });
     expect(dismissed).toMatchObject({ state: "dismissed", sourceNumber: 7 });
+  });
+
+  it("does not undo a dismissal that lands while the merge is processed", async () => {
+    await finding(7, "fp-race");
+    await merge(7);
+    await finding(9, "fp-race");
+
+    // The dismiss route takes no backlog lock: dismiss right after the merge reads the item.
+    const real = prisma.$transaction.bind(prisma) as (fn: (tx: Prisma.TransactionClient) => Promise<unknown>, opts?: unknown) => Promise<unknown>;
+    const spy = vi.spyOn(prisma, "$transaction").mockImplementation(((fn: (tx: Prisma.TransactionClient) => Promise<unknown>, opts?: unknown) =>
+      real(async (tx) => {
+        const read = tx.backlogItem.findUnique.bind(tx.backlogItem);
+        (tx.backlogItem as { findUnique: unknown }).findUnique = async (args: never) => {
+          const item = await read(args);
+          await prisma.backlogItem.updateMany({
+            where: { fingerprint: "fp-race" },
+            data: { state: "dismissed", dismissedAt: new Date(), dismissNote: "won't fix" },
+          });
+          return item;
+        };
+        return fn(tx);
+      }, opts)) as never);
+    let outcome;
+    try {
+      outcome = await merge(9);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(outcome!.promoted).toBe(0);
+    const [item] = await items();
+    expect(item).toMatchObject({ state: "dismissed", dismissNote: "won't fix", sourceNumber: 7 });
   });
 });
 

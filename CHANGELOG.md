@@ -19,7 +19,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   the file, the diff removed or rewrote one of the item's lines (or inserted
   between them) and the finding was not reported again; invalidated when the
   file was deleted or renamed. A resolved item that ships again reopens; a
-  dismissed one stays dismissed. Merges arrive from the GitHub and GitLab close
+  dismissed one stays dismissed, even when it is dismissed while the merge is
+  being processed. Merges arrive from the GitHub and GitLab close
   webhooks (now acted on whatever `abortOnClose` says), from a review that
   sees its change merge while it runs (whatever `abortOnClose` says, recorded
   once the run's findings are stored), and from a worker sweep that asks the forge about quiet changes with
