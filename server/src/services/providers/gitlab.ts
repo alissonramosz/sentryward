@@ -5,6 +5,7 @@ import { GitLabAdapter } from "../../review/forge/gitlab.ts";
 import { gitlabConnectSchema } from "../../schemas/connections.schema.ts";
 import { gitlabAccessToken, gitlabOAuthConfigured } from "../gitlabOAuth.ts";
 import { cancelQueuedForClosedChange, enqueue, enqueueFromWebhook } from "../../worker/queue.ts";
+import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
 import { recordThreadReply } from "../threadReplies.ts";
 import type { ProviderDefinition } from "./types.ts";
 import { decryptToken } from "./token.ts";
@@ -26,6 +27,7 @@ interface GitLabPayload {
     type?: string | null;
     discussion_id?: string;
     last_commit?: { id: string };
+    target_branch?: string;
   };
   changes?: { draft?: { previous: boolean; current: boolean } };
   merge_request?: { iid: number; last_commit: { id: string } };
@@ -80,7 +82,20 @@ export const gitlabProvider: ProviderDefinition = {
 
       if (event === "Merge Request Hook" && (attrs.action === "close" || attrs.action === "merge") && attrs.iid) {
         const cancelled = await cancelQueuedForClosedChange(repo, attrs.iid);
+        // Whatever abortOnClose says: a merge moves the change's findings into
+        // the backlog. Not swallowed, so GitLab retries on a failure; it is idempotent.
+        await recordChangeState({
+          repositoryId: repo.id,
+          number: attrs.iid,
+          state: attrs.action === "merge" ? "merged" : "closed",
+          baseBranch: attrs.target_branch,
+        });
         return { body: { outcome: "closed", cancelled } };
+      }
+
+      // A change closed unmerged can come back; the sweep stops treating it as closed.
+      if (event === "Merge Request Hook" && attrs.action === "reopen" && attrs.iid) {
+        await recordChangeStateQuietly({ repositoryId: repo.id, number: attrs.iid, state: "open", baseBranch: attrs.target_branch });
       }
 
       if (event === "Merge Request Hook") {

@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router"
 import {
   Bell,
   Bug,
+  ClipboardList,
   ChevronRight,
   ChevronsUpDown,
   Coins,
@@ -73,6 +74,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/reviews", label: "Reviews", icon: GitPullRequest },
       { to: "/findings", label: "Findings", icon: Bug },
+      { to: "/backlog", label: "Backlog", icon: ClipboardList },
     ],
   },
   {

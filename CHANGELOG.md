@@ -10,6 +10,26 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- A backlog of findings that shipped. When a pull or merge request merges,
+  its findings that were still open, or ignored as "fix later", become
+  repository-level backlog items (`backlog_items`, a new table) that outlive
+  the change's own findings. A change closed without merging adds nothing.
+  At the same merge, earlier open items on the branch it merged into are
+  resolved from the change's latest stored review: fixed when the review read
+  the file, the diff removed or rewrote one of the item's lines (or inserted
+  between them) and the finding was not reported again; invalidated when the
+  file was deleted or renamed. A resolved item that ships again reopens; a
+  dismissed one stays dismissed. Merges arrive from the GitHub and GitLab close
+  webhooks (now acted on whatever `abortOnClose` says), from a review's close
+  watch, and from a worker sweep that asks the forge about quiet changes with
+  unaddressed findings every few hours, so a missed webhook is caught before
+  retention purges the findings (`change_states`, a new table, records what
+  is known). A new **Backlog** page lists items with filters for state,
+  origin, severity, category, type, age and repository, a stats strip (open
+  items by severity and age), and dismiss (with an optional note) and reopen
+  actions, backed by `GET /api/backlog`, `GET /api/backlog/stats`,
+  `GET /api/backlog/:id` and `PATCH /api/backlog/:id`. Retention deletes
+  items resolved or dismissed longer ago than the period and keeps open ones.
 - A focus for a single review: `/sentryward review focus on <area>` (or
   `focus: <area>`) asks that run to look hardest at the area named, while
   still reporting real problems elsewhere. The rest of the command's line is

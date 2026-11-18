@@ -33,6 +33,7 @@ import { publishes, publishReview, resolvesThreads } from "../review/publish/pub
 import { pendingStatus } from "../review/publish/status.ts";
 import { summarize } from "../review/render/json.ts";
 import { cancelledMarkdown, progressMarkdown } from "../review/render/progress.ts";
+import { recordChangeStateQuietly } from "../services/backlog.ts";
 import { adapterForConnection, type Forge } from "../services/forge.ts";
 import {
   CREDENTIALS_REJECTED_REASON,
@@ -322,6 +323,8 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     const { state } = await forge.getChangeHead(repo.fullPath, job.number);
     if (state !== "closed" && state !== "merged") return false;
     cancelledBy = "closed";
+    // The webhook may have missed it; a merge moves the backlog either way.
+    await recordChangeStateQuietly({ repositoryId: repo.id, number: job.number, state, baseBranch: changeSet.baseRef });
     return true;
   }, deps.closeCheckIntervalMs ?? CLOSE_CHECK_INTERVAL_MS);
   // Whether the summary comment (progress note or review) is on the change, so

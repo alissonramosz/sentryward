@@ -15,6 +15,7 @@ import {
   enqueue,
   enqueueFromWebhook,
 } from "../../worker/queue.ts";
+import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
 import { getGitHubApp, githubConfigured } from "../githubApp.ts";
 import { recordThreadReply } from "../threadReplies.ts";
 import type { HeaderReader, ProviderDefinition, RepoWithConnection, WebhookOutcome } from "./types.ts";
@@ -42,7 +43,16 @@ export interface GitHubPayload {
   // installation_repositories events only.
   repositories_added?: { id: number }[];
   repositories_removed?: { id: number }[];
-  pull_request?: { number: number; head: { sha: string }; user?: { id: number } };
+  pull_request?: {
+    number: number;
+    head: { sha: string };
+    base?: { ref: string };
+    user?: { id: number };
+    // Set on "closed": merged tells a merge from a close.
+    merged?: boolean;
+    merged_at?: string | null;
+    closed_at?: string | null;
+  };
   issue?: { number: number; pull_request?: unknown };
   comment?: {
     id?: number;
@@ -141,12 +151,27 @@ export async function handleGithubEvent(
   payload: GitHubPayload,
 ): Promise<WebhookOutcome> {
   if (isPullRequestClose(event, payload)) {
-    const cancelled = await cancelQueuedForClosedChange(repo, payload.pull_request!.number);
+    const pull = payload.pull_request!;
+    const cancelled = await cancelQueuedForClosedChange(repo, pull.number);
+    // Whatever abortOnClose says: a merge moves the change's findings into the
+    // backlog. Not swallowed, so GitHub redelivers on a failure; it is idempotent.
+    const at = pull.merged ? pull.merged_at : pull.closed_at;
+    await recordChangeState({
+      repositoryId: repo.id,
+      number: pull.number,
+      state: pull.merged ? "merged" : "closed",
+      baseBranch: pull.base?.ref,
+      closedAt: at ? new Date(at) : null,
+    });
     return { body: { outcome: "closed", cancelled } };
   }
 
   if (isPullRequestPush(event, payload)) {
     const pull = payload.pull_request!;
+    // A change closed unmerged can come back; the sweep stops treating it as closed.
+    if (payload.action === "reopened") {
+      await recordChangeStateQuietly({ repositoryId: repo.id, number: pull.number, state: "open", baseBranch: pull.base?.ref });
+    }
     const result = await enqueueFromWebhook({
       repositoryId: repo.id,
       number: pull.number,

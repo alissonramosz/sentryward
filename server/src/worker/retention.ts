@@ -142,6 +142,9 @@ export async function purgeStaleChanges(
           where: { ...where, resultExpiredAt: null, finishedAt: { lt: cutoff }, status: { in: TRIMMED } },
           data: { result: Prisma.DbNull, resolvedConfig: Prisma.DbNull, publication: Prisma.DbNull, resultExpiredAt: now },
         }),
+        // What the backlog knew about it being open or merged; its backlog
+        // items belong to the repository and stay.
+        prisma.changeState.deleteMany({ where }),
       ]);
       total.changes++;
       total.findings += findings.count;
@@ -196,10 +199,39 @@ async function staleChanges(cutoff: Date, batchSize: number, workspaceIds?: stri
   `;
 }
 
+// Backlog items a merge resolved, or a person dismissed, longer ago than the
+// window. Open items are the backlog itself and stay until they are resolved
+// or dismissed: they outlive the change they came from on purpose. The backlog
+// sweep checks quiet changes every few hours, so a merge is found and its
+// findings promoted long before purgeStaleChanges deletes them.
+export async function pruneBacklog(
+  days: number,
+  { now = new Date(), batchSize = 1000, workspaceIds }: PruneOptions = {},
+): Promise<number> {
+  const cutoff = new Date(now.getTime() - days * DAY_MS);
+  const where: Prisma.BacklogItemWhereInput = {
+    OR: [
+      { state: "resolved", resolvedAt: { lt: cutoff } },
+      { state: "dismissed", dismissedAt: { lt: cutoff } },
+    ],
+    ...(workspaceIds ? { repository: { connection: { workspaceId: { in: workspaceIds } } } } : {}),
+  };
+  let deleted = 0;
+  for (;;) {
+    const rows = await prisma.backlogItem.findMany({ where, select: { id: true }, take: batchSize });
+    if (rows.length) {
+      deleted += (await prisma.backlogItem.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } })).count;
+    }
+    if (rows.length < batchSize) break;
+  }
+  return deleted;
+}
+
 export interface RetentionResult extends PruneResult, PurgeResult {
   auditRows: number;
   oauthStates: number;
   deliveries: number;
+  backlogItems: number;
 }
 
 // The delivery log answers "is this target working", so recent rows are all it
@@ -280,6 +312,7 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     auditRows: 0,
     oauthStates: 0,
     deliveries: 0,
+    backlogItems: 0,
   };
   for (const [days, workspaceIds] of byDays) {
     const pruned = await pruneReviews(days, { now, workspaceIds });
@@ -290,6 +323,7 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     result.findings += purged.findings;
     result.postedFindings += purged.postedFindings;
     result.replies += purged.replies;
+    result.backlogItems += await pruneBacklog(days, { now, workspaceIds });
     if (days < DELIVERY_RETENTION_DAYS) {
       result.deliveries += await pruneDeliveries(days, { now, workspaceIds });
     }
