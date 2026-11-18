@@ -132,6 +132,23 @@ describe("Monthly budget", () => {
     await waitFor(() => expect(saved).toEqual([{ monthlyBudgetUsd: null }]))
   })
 
+  it("keeps Save disabled while the budget is being removed", async () => {
+    let finish: (response: Response) => void = () => {}
+    mockApi({
+      "GET /api/settings/api-keys": noKeys,
+      "GET /api/settings/model-prices": prices,
+      "GET /api/settings/budget": WITH_BUDGET,
+      "PUT /api/settings/budget": () => new Promise<Response>((resolve) => (finish = resolve)),
+    })
+    renderWithProviders(<App />, { route: "/llm-connections?tab=prices" })
+
+    await userEvent.click(await within(await budgetCard()).findByRole("button", { name: "Edit budget" }))
+    const dialog = await screen.findByRole("dialog")
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remove budget" }))
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Save budget" })).toBeDisabled())
+    finish(jsonResponse(200, NO_BUDGET))
+  })
+
   it("shows members the budget without letting them change it", async () => {
     const asMember = testWorkspaces.map((workspace) => ({ ...workspace, role: "member" }))
     mockApi({

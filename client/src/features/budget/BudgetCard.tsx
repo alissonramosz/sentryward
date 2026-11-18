@@ -92,7 +92,7 @@ function BudgetDialog({ budget, open, onOpenChange }: { budget: Budget; open: bo
                 Cancel
               </Button>
             </DialogClose>
-            <Button type="submit" disabled={form.formState.isSubmitting}>
+            <Button type="submit" disabled={form.formState.isSubmitting || save.isPending}>
               {form.formState.isSubmitting && <Loader2 className="animate-spin" />}
               Save budget
             </Button>

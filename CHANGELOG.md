@@ -13,7 +13,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - Monthly spend alerts. Workspace admins can set a monthly budget in USD
   (`workspaces.monthly_budget_usd`) under **Prices and budget** on the LLM
   Connections page (the tab was **Model prices**). It only notifies: reviews
-  never stop over it. The worker checks every 5 minutes and alerts when the
+  never stop over it. The worker checks every 5 minutes (50 workspaces per
+  poll, 4 at a time, so a large scan never holds up reviews or notification
+  deliveries) and alerts when the
   UTC month's estimated review spend (the same figures as the Usage page)
   reaches 50, 75, 90 and 100% of the budget, and when it passes 110% (over
   budget), each at most once a month (`budget_alerts`, a new table, records

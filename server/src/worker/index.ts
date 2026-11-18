@@ -10,7 +10,7 @@ import { executeReply } from "./executeReply.ts";
 import { runRetention } from "./retention.ts";
 import { sweepClosedChanges } from "./backlogSweep.ts";
 import { applyPendingMerges } from "../services/backlog.ts";
-import { runBudgetAlerts } from "./budgetAlerts.ts";
+import { runBudgetAlertPage } from "./budgetAlerts.ts";
 
 let stopping = false;
 const running = new Set<Promise<void>>();
@@ -35,9 +35,12 @@ let lastSweepAt = 0;
 const BACKLOG_APPLY_INTERVAL_MS = 30 * 1000;
 let lastApplyAt = 0;
 // A month's spend moves with each finished review; a few minutes' delay on a
-// budget alert is fine, and each pass reads every budgeted workspace's month.
+// budget alert is fine, and each scan reads every budgeted workspace's month.
+// A scan starts this long after the previous one started and runs one page of
+// workspaces per poll; budgetCursor is where it left off (null between scans).
 const BUDGET_INTERVAL_MS = 5 * 60 * 1000;
 let lastBudgetAt = 0;
+let budgetCursor: string | null = null;
 
 // Claims are awaited one at a time; the work itself runs in the background up
 // to WORKER_CONCURRENCY jobs. Replies to inline threads share the slots and
@@ -114,13 +117,20 @@ async function prune(): Promise<void> {
   }
 }
 
-// Announces newly crossed budget thresholds (budgetAlerts.ts). Like prune, the
-// time is set first so a failing pass waits for the next interval.
+// Announces newly crossed budget thresholds (budgetAlerts.ts), one page of
+// workspaces per poll so a large scan never stalls claims and deliveries. Like
+// prune, the time is set first so a failing scan waits for the next interval;
+// the cursor is dropped first for the same reason, a failing page ending the scan.
 async function checkBudgets(): Promise<void> {
-  if (Date.now() - lastBudgetAt < BUDGET_INTERVAL_MS) return;
-  lastBudgetAt = Date.now();
-  const announced = await runBudgetAlerts();
-  if (announced) console.log(`[worker] queued ${announced} budget alert(s)`);
+  if (budgetCursor === null) {
+    if (Date.now() - lastBudgetAt < BUDGET_INTERVAL_MS) return;
+    lastBudgetAt = Date.now();
+  }
+  const after = budgetCursor;
+  budgetCursor = null;
+  const page = await runBudgetAlertPage(new Date(), after);
+  budgetCursor = page.next;
+  if (page.announced) console.log(`[worker] queued ${page.announced} budget alert(s)`);
 }
 
 // Applies recorded merges to the backlog (backlog.ts). Like prune, the time is

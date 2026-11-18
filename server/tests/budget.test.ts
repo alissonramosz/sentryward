@@ -7,7 +7,7 @@ import { mailer } from "../src/lib/mailer.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { budgetPayload, dueAlert, monthSpend, monthStart } from "../src/services/budget.ts";
 import { deliver, notifyJob } from "../src/services/notifications.ts";
-import { runBudgetAlerts, sendAdminEmails } from "../src/worker/budgetAlerts.ts";
+import { runBudgetAlertPage, runBudgetAlerts, sendAdminEmails } from "../src/worker/budgetAlerts.ts";
 import { claimDueDeliveries, runDelivery } from "../src/worker/deliveryQueue.ts";
 import { runRetention } from "../src/worker/retention.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
@@ -155,6 +155,41 @@ describe("runBudgetAlerts", () => {
     expect(rows[0]!.payload).toMatchObject({ threshold: 110, overBudget: true });
     const recorded = await prisma.budgetAlert.findMany({ orderBy: { threshold: "asc" } });
     expect(recorded.map((row) => row.threshold)).toEqual([50, 75, 90, 100, 110]);
+  });
+
+  it("checks workspaces a page at a time, resuming after the cursor", async () => {
+    await setBudget(10);
+    await review(6);
+    for (const email of ["two@example.com", "three@example.com"]) {
+      const other = await createUser(email);
+      const connection = await prisma.forgeConnection.create({
+        data: { workspaceId: other.workspace.id, provider: "github", host: "github.com", kind: "github_app", installationId: email, accountLogin: email },
+      });
+      const repo = await prisma.repository.create({
+        data: { connectionId: connection.id, provider: "github", host: "github.com", fullPath: `${email}/web`, externalId: email, defaultBranch: "main" },
+      });
+      await prisma.workspace.update({ where: { id: other.workspace.id }, data: { monthlyBudgetUsd: 10 } });
+      number++;
+      await prisma.reviewJob.create({
+        data: {
+          repositoryId: repo.id,
+          number,
+          headSha: `h${number}`,
+          trigger: "manual",
+          status: "completed",
+          createdAt: NOW,
+          summary: { usageByModel: { [PRICED]: { calls: 1, unpricedCalls: 0, inputTokens: 100, outputTokens: 10, cost: { total: 6 } } } },
+        },
+      });
+    }
+    const first = await runBudgetAlertPage(NOW, null, undefined, 2);
+    expect(first.announced).toBe(2);
+    expect(first.next).not.toBeNull();
+    const second = await runBudgetAlertPage(NOW, first.next, undefined, 2);
+    expect(second).toEqual({ announced: 1, next: null });
+    const alerted = await prisma.budgetAlert.findMany({ select: { workspaceId: true } });
+    expect(new Set(alerted.map((row) => row.workspaceId)).size).toBe(3);
+    expect(alerted).toHaveLength(3);
   });
 
   it("counts only this UTC month's reviews, like the Usage page", async () => {

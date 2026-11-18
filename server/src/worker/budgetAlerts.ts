@@ -1,6 +1,7 @@
 import { Prisma } from "../generated/prisma/client.ts";
 import { type Mail, mailer } from "../lib/mailer.ts";
 import { prisma } from "../lib/prisma.ts";
+import { mapLimit } from "../review/core/mapLimit.ts";
 import { budgetPayload, dueAlert, monthSpend, monthStart } from "../services/budget.ts";
 import { budgetEmail, type BudgetPayload, MAX_DELIVERY_ATTEMPTS } from "../services/notifications.ts";
 import { DELIVERY_LOCK_TIMEOUT_MS } from "./deliveryQueue.ts";
@@ -25,29 +26,62 @@ const defaultDeps: BudgetAlertDeps = { send: (mail) => mailer.send(mail) };
 // (SKIP LOCKED), and the unique (workspace, month, threshold) row means it is
 // announced once a month whatever happens after. Target deliveries are sent
 // and retried by deliveryQueue.ts; the admin emails by sendAdminEmails, at the
-// end of this pass and of every later one. Returns how many alerts were
-// announced.
+// end of every page. Returns how many alerts were announced.
+//
+// The worker does not call this: it runs one runBudgetAlertPage per poll, so
+// a scan of many workspaces never holds up claiming reviews or dispatching
+// deliveries for longer than one page.
 export async function runBudgetAlerts(now = new Date(), deps: BudgetAlertDeps = defaultDeps): Promise<number> {
+  let announced = 0;
+  let after: string | null = null;
+  do {
+    const page = await runBudgetAlertPage(now, after, deps);
+    announced += page.announced;
+    after = page.next;
+  } while (after !== null);
+  return announced;
+}
+
+// Workspaces checked per page, and how many of their transactions run at once.
+// Each check holds a pooled connection for its spend aggregation, so the
+// concurrency stays well under the pool the job claims share.
+export const BUDGET_PAGE = 50;
+const BUDGET_CONCURRENCY = 4;
+
+// Checks the next page of budgeted workspaces after `after` (by id), then sends
+// a batch of owed admin emails. `next` is the cursor for the following page,
+// or null once the scan is done.
+export async function runBudgetAlertPage(
+  now: Date,
+  after: string | null,
+  deps: BudgetAlertDeps = defaultDeps,
+  limit = BUDGET_PAGE,
+): Promise<{ announced: number; next: string | null }> {
   const workspaces = await prisma.workspace.findMany({
-    where: { monthlyBudgetUsd: { not: null } },
+    where: { monthlyBudgetUsd: { not: null }, ...(after ? { id: { gt: after } } : {}) },
+    orderBy: { id: "asc" },
+    take: limit,
     select: { id: true },
   });
-  let announced = 0;
-  for (const { id } of workspaces) {
+  const outcomes = await mapLimit(workspaces, BUDGET_CONCURRENCY, async ({ id }) => {
     try {
-      if (await prisma.$transaction((tx) => checkWorkspace(tx, id, now))) announced++;
+      return await prisma.$transaction((tx) => checkWorkspace(tx, id, now));
     } catch (err) {
       // One workspace failing must not hold up the others; the next pass retries it.
       console.error(`[worker] budget check for workspace ${id} failed`, err);
+      return false;
     }
-  }
+  });
   try {
     await sendAdminEmails(now, deps);
   } catch (err) {
     // What was claimed stays locked until the lock goes stale, then is retried.
     console.error("[notify] budget emails failed", err);
   }
-  return announced;
+  return {
+    announced: outcomes.filter(Boolean).length,
+    next: workspaces.length === limit ? workspaces[limit - 1]!.id : null,
+  };
 }
 
 async function checkWorkspace(tx: Prisma.TransactionClient, workspaceId: string, now: Date): Promise<boolean> {
