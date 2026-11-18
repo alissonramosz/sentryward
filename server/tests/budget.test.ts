@@ -212,6 +212,111 @@ describe("runBudgetAlerts", () => {
     expect(await deliveries()).toHaveLength(1);
   });
 
+  describe("admin email outbox", () => {
+    const owed = async () =>
+      (await prisma.budgetAlert.findMany({ where: { workspaceId }, orderBy: { threshold: "asc" } })).map((row) => ({
+        threshold: row.threshold,
+        adminUserIds: row.adminUserIds,
+        attempts: row.adminEmailAttempts,
+        locked: row.adminEmailLockedAt !== null,
+      }));
+
+    let adminId: string;
+    beforeEach(async () => {
+      vi.spyOn(mailer, "configured").mockReturnValue(true);
+      adminId = (await createUser("admin@example.com")).user.id;
+      await addMember(workspaceId, adminId, "admin");
+      await setBudget(10);
+    });
+
+    it("queues the email with the announced threshold only, and clears it once sent", async () => {
+      const send = vi.fn().mockResolvedValue(undefined);
+      await review(8);
+      await runBudgetAlerts(NOW, { send });
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(await owed()).toEqual([
+        { threshold: 50, adminUserIds: [], attempts: 0, locked: false },
+        { threshold: 75, adminUserIds: [], attempts: 1, locked: false },
+      ]);
+      const row = await prisma.budgetAlert.findFirstOrThrow({ where: { threshold: 75 } });
+      expect(row.adminEmailPayload).toBeNull();
+    });
+
+    it("retries only the admins whose email failed, on the next pass", async () => {
+      const send = vi.fn(async ({ to }: { to: string }) => {
+        if (to === "admin@example.com") throw new Error("SMTP 451");
+      });
+      await review(5);
+      await runBudgetAlerts(NOW, { send });
+      expect(await owed()).toEqual([{ threshold: 50, adminUserIds: [adminId], attempts: 1, locked: false }]);
+
+      const retry = vi.fn().mockResolvedValue(undefined);
+      expect(await runBudgetAlerts(NOW, { send: retry })).toBe(0);
+      expect(retry.mock.calls.map(([mail]) => mail.to)).toEqual(["admin@example.com"]);
+      expect(retry.mock.calls[0]![0].subject).toBe("50% of this month's budget spent in Dev");
+      expect(await owed()).toEqual([{ threshold: 50, adminUserIds: [], attempts: 2, locked: false }]);
+    });
+
+    it("keeps the email when the worker dies after the threshold is committed", async () => {
+      await review(5);
+      // A claim that never finishes stands in for a worker dying mid-send.
+      vi.spyOn(prisma.membership, "findMany").mockRejectedValueOnce(new Error("connection lost"));
+      const send = vi.fn().mockResolvedValue(undefined);
+      // The check reads memberships in its transaction client, not this spy;
+      // the send's read is the one that fails.
+      await runBudgetAlerts(NOW, { send });
+      expect(send).not.toHaveBeenCalled();
+      expect(await owed()).toMatchObject([{ adminUserIds: expect.arrayContaining([adminId, userId]), locked: true }]);
+
+      // A fresh lock is left alone.
+      await runBudgetAlerts(NOW, { send });
+      expect(send).not.toHaveBeenCalled();
+
+      await prisma.budgetAlert.updateMany({ data: { adminEmailLockedAt: new Date(Date.now() - 6 * 60_000) } });
+      await runBudgetAlerts(NOW, { send });
+      expect(send.mock.calls.map(([mail]) => mail.to).sort()).toEqual(["admin@example.com", "owner@example.com"]);
+      expect(await owed()).toEqual([{ threshold: 50, adminUserIds: [], attempts: 2, locked: false }]);
+    });
+
+    it("gives up after the attempt limit", async () => {
+      const send = vi.fn().mockRejectedValue(new Error("SMTP down"));
+      await review(5);
+      for (let pass = 0; pass < 7; pass++) await runBudgetAlerts(NOW, { send });
+      // Owner and admin, five attempts each.
+      expect(send).toHaveBeenCalledTimes(10);
+      expect(await owed()).toEqual([{ threshold: 50, adminUserIds: [], attempts: 5, locked: false }]);
+    });
+
+    it("does not send last month's email in a new month", async () => {
+      await review(5);
+      await runBudgetAlerts(NOW, { send: vi.fn().mockRejectedValue(new Error("SMTP down")) });
+      const send = vi.fn().mockResolvedValue(undefined);
+      await runBudgetAlerts(new Date("2026-12-02T00:00:00Z"), { send });
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it("does not mail someone who stopped being an admin before the retry", async () => {
+      await review(5);
+      await runBudgetAlerts(NOW, { send: vi.fn().mockRejectedValue(new Error("SMTP down")) });
+      await prisma.membership.updateMany({ where: { workspaceId, userId: adminId }, data: { role: "member" } });
+      const send = vi.fn().mockResolvedValue(undefined);
+      await runBudgetAlerts(NOW, { send });
+      expect(send.mock.calls.map(([mail]) => mail.to)).toEqual(["owner@example.com"]);
+      expect(await owed()).toEqual([{ threshold: 50, adminUserIds: [], attempts: 2, locked: false }]);
+    });
+
+    it("never records a threshold without its email", async () => {
+      await review(5);
+      // The delivery insert runs last in the check's transaction.
+      vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(new Error("deadlock"));
+      const send = vi.fn().mockResolvedValue(undefined);
+      expect(await runBudgetAlerts(NOW, { send })).toBe(0);
+      expect(await owed()).toEqual([]);
+      expect(await runBudgetAlerts(NOW, { send })).toBe(1);
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("sends the alert through the outbox to a webhook", async () => {
     await target(["budget"]);
     await setBudget(10);

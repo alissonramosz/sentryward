@@ -868,11 +868,27 @@ model BudgetAlert {
   spendUsd    Float    @map("spend_usd")
   budgetUsd   Float    @map("budget_usd")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  // The owners and admins still owed this alert by email: the outbox for
+  // that mail, written in the transaction that records the threshold, so a
+  // worker dying after the commit cannot lose it (worker/budgetAlerts.ts).
+  // Only the announced row of a pass has any. User ids rather than
+  // addresses, so a retry mails the current address and skips anyone no
+  // longer an owner or admin.
+  adminUserIds       String[]  @default([]) @map("admin_user_ids") @db.Uuid
+  // The BudgetPayload, so a retry sends what the first attempt did; cleared
+  // once nobody is owed the mail.
+  adminEmailPayload  Json?     @map("admin_email_payload")
+  // Sends started so far; a claim counts one before sending.
+  adminEmailAttempts Int       @default(0) @map("admin_email_attempts")
+  // Set while a worker is sending; a stale lock means that worker died.
+  adminEmailLockedAt DateTime? @map("admin_email_locked_at") @db.Timestamptz
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, month, threshold])
   @@index([createdAt])
+  // The admin email claim looks only at this month's rows.
+  @@index([month])
   @@map("budget_alerts")
 }
 

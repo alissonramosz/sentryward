@@ -1410,8 +1410,10 @@ because of it.
 - **Where alerts go:** to every active workspace notification target with the
   **Budget** event (see [Notifications](#notifications)), and, when mail is
   configured, by email to the workspace's owners and admins. An admin already
-  on an email target with the Budget event is not mailed twice. The worker
-  checks every 5 minutes.
+  on an email target with the Budget event is not mailed twice. The admin
+  email is queued with the alert, so a worker restart cannot lose it, and a
+  failed one is retried on each check (up to 5 attempts) until the month
+  ends. The worker checks every 5 minutes.
 - **Prices first:** a budget can only be switched on once every model the
   workspace's reviews called in the last 90 days has a price (built-in or the
   workspace's own), since an unpriced call adds nothing to the spend. If a

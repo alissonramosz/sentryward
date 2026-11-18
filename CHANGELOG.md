@@ -22,7 +22,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `notification_event`; personal targets don't offer it), at once whatever
   the target's scope or digest schedule, through the usual outbox, and by email
   to owners and admins when mail is configured (skipping anyone an email target
-  with the event already reaches). Webhooks get a `budget` body with the month,
+  with the event already reaches). The admin email is queued in the same
+  transaction as the alert record (`admin_user_ids`, `admin_email_payload`,
+  `admin_email_attempts` and `admin_email_locked_at` on `budget_alerts`), so a
+  worker restart or SMTP failure cannot lose it: anyone whose email failed is
+  retried on the next check, up to 5 attempts, until the month ends, and
+  only while still an owner or admin. Webhooks get a `budget` body with the month,
   threshold, spend, budget and unpriced calls; Slack, Google Chat, Discord,
   Teams and email get a short message with a **View usage** link. A budget can
   only be switched on once every model used in the last 90 days has a price.
