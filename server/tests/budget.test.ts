@@ -5,9 +5,9 @@ import type { NotificationEvent, NotificationKind } from "../src/generated/prism
 import { encrypt } from "../src/lib/crypto.ts";
 import { mailer } from "../src/lib/mailer.ts";
 import { prisma } from "../src/lib/prisma.ts";
-import { budgetPayload, dueAlert, monthStart } from "../src/services/budget.ts";
+import { budgetPayload, dueAlert, monthSpend, monthStart } from "../src/services/budget.ts";
 import { deliver, notifyJob } from "../src/services/notifications.ts";
-import { runBudgetAlerts } from "../src/worker/budgetAlerts.ts";
+import { runBudgetAlerts, sendAdminEmails } from "../src/worker/budgetAlerts.ts";
 import { claimDueDeliveries, runDelivery } from "../src/worker/deliveryQueue.ts";
 import { runRetention } from "../src/worker/retention.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
@@ -165,6 +165,28 @@ describe("runBudgetAlerts", () => {
     expect(await runBudgetAlerts(NOW)).toBe(0);
   });
 
+  it("sums spend and unpriced calls across models, at no cost for digests from before per-model usage", async () => {
+    await review(1.5, { unpricedCalls: 2 });
+    await review(0.25, { model: "openai/gpt-5" });
+    number++;
+    await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number,
+        headSha: `h${number}`,
+        trigger: "manual",
+        status: "completed",
+        createdAt: NOW,
+        summary: { usageTotals: { calls: 3, inputTokens: 500, outputTokens: 50 } },
+      },
+    });
+    number++;
+    await prisma.reviewJob.create({
+      data: { repositoryId, number, headSha: `h${number}`, trigger: "manual", status: "queued", createdAt: NOW },
+    });
+    expect(await monthSpend(workspaceId, NOW)).toEqual({ usd: 1.75, unpricedCalls: 2 });
+  });
+
   it("starts again in a new month", async () => {
     await target(["budget"]);
     await setBudget(10);
@@ -303,6 +325,48 @@ describe("runBudgetAlerts", () => {
       await runBudgetAlerts(NOW, { send });
       expect(send.mock.calls.map(([mail]) => mail.to)).toEqual(["owner@example.com"]);
       expect(await owed()).toEqual([{ threshold: 50, adminUserIds: [], attempts: 2, locked: false }]);
+    });
+
+    // Alert rows owing the admin email, written as checkWorkspace writes them.
+    async function owing(thresholds: number[]) {
+      const payload = budgetPayload({ id: workspaceId, name: "Dev" }, monthStart(NOW), 50, { usd: 5, unpricedCalls: 0 }, 10);
+      await prisma.budgetAlert.createMany({
+        data: thresholds.map((threshold, i) => ({
+          workspaceId,
+          month: monthStart(NOW),
+          threshold,
+          spendUsd: 5,
+          budgetUsd: 10,
+          createdAt: new Date(NOW.getTime() + i),
+          adminUserIds: [adminId],
+          adminEmailPayload: { ...payload, threshold } as never,
+        })),
+      });
+    }
+
+    it("claims in batches and sends every batch in one pass", async () => {
+      await owing([50, 75, 90]);
+      const send = vi.fn().mockResolvedValue(undefined);
+      await sendAdminEmails(NOW, { send }, 1);
+      expect(send).toHaveBeenCalledTimes(3);
+      expect(await owed()).toEqual([
+        { threshold: 50, adminUserIds: [], attempts: 1, locked: false },
+        { threshold: 75, adminUserIds: [], attempts: 1, locked: false },
+        { threshold: 90, adminUserIds: [], attempts: 1, locked: false },
+      ]);
+    });
+
+    it("leaves a failed email for the next pass rather than the next batch", async () => {
+      await owing([50, 75]);
+      const send = vi.fn().mockRejectedValue(new Error("SMTP 451"));
+      await sendAdminEmails(NOW, { send }, 1);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(await owed()).toEqual([
+        { threshold: 50, adminUserIds: [adminId], attempts: 1, locked: false },
+        { threshold: 75, adminUserIds: [adminId], attempts: 1, locked: false },
+      ]);
+      await sendAdminEmails(NOW, { send: vi.fn().mockResolvedValue(undefined) }, 1);
+      expect((await owed()).map((row) => row.attempts)).toEqual([2, 2]);
     });
 
     it("never records a threshold without its email", async () => {

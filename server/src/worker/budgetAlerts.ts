@@ -10,6 +10,10 @@ export interface BudgetAlertDeps {
   send: (mail: Mail) => Promise<void>;
 }
 
+// Admin emails claimed at once. A row's sends can each take up to the 10s SMTP
+// timeouts, so a batch this size is sent well inside DELIVERY_LOCK_TIMEOUT_MS.
+export const ADMIN_EMAIL_BATCH = 10;
+
 // Late-bound so tests can replace mailer.send.
 const defaultDeps: BudgetAlertDeps = { send: (mail) => mailer.send(mail) };
 
@@ -144,29 +148,47 @@ interface ClaimedEmail {
 // itself; that can mail someone twice, which beats never mailing them. Only
 // this month's alerts are sent: late news about a budget is no news. Retries
 // follow the budget pass's interval rather than a backoff of their own.
-export async function sendAdminEmails(now: Date, deps: BudgetAlertDeps = defaultDeps): Promise<void> {
-  const staleBefore = new Date(Date.now() - DELIVERY_LOCK_TIMEOUT_MS);
-  const claimed = await prisma.$queryRaw<ClaimedEmail[]>`
-    UPDATE budget_alerts
-    SET admin_email_locked_at = date_trunc('milliseconds', clock_timestamp()),
-        admin_email_attempts = admin_email_attempts + 1
-    WHERE id IN (
-      SELECT id FROM budget_alerts
-      WHERE month = ${monthStart(now)}
-        AND cardinality(admin_user_ids) > 0
-        AND admin_email_attempts < ${MAX_DELIVERY_ATTEMPTS}
-        AND (admin_email_locked_at IS NULL OR admin_email_locked_at < ${staleBefore})
-      FOR UPDATE SKIP LOCKED
-    )
-    RETURNING id, workspace_id, admin_user_ids, admin_email_payload, admin_email_attempts, admin_email_locked_at
-  `;
-  for (const row of claimed) {
-    try {
-      await sendAdminEmail(row, deps);
-    } catch (err) {
-      // Left locked; once the lock is stale a later pass claims it again.
-      console.error(`[notify] could not email about budget alert ${row.id}`, err);
+//
+// Rows are claimed a batch at a time and the next batch only once this one is
+// sent, so no claimed row waits behind the others long enough for its lock to
+// go stale and another worker to mail it again. A row already handled in this
+// pass is not claimed again: one whose emails partly failed is unlocked for a
+// retry, which belongs to the next pass, not to this one's next batch.
+export async function sendAdminEmails(
+  now: Date,
+  deps: BudgetAlertDeps = defaultDeps,
+  batchSize = ADMIN_EMAIL_BATCH,
+): Promise<void> {
+  const handled: string[] = [];
+  for (;;) {
+    const staleBefore = new Date(Date.now() - DELIVERY_LOCK_TIMEOUT_MS);
+    const claimed = await prisma.$queryRaw<ClaimedEmail[]>`
+      UPDATE budget_alerts
+      SET admin_email_locked_at = date_trunc('milliseconds', clock_timestamp()),
+          admin_email_attempts = admin_email_attempts + 1
+      WHERE id IN (
+        SELECT id FROM budget_alerts
+        WHERE month = ${monthStart(now)}
+          AND cardinality(admin_user_ids) > 0
+          AND admin_email_attempts < ${MAX_DELIVERY_ATTEMPTS}
+          AND (admin_email_locked_at IS NULL OR admin_email_locked_at < ${staleBefore})
+          AND NOT (id = ANY(${handled}::uuid[]))
+        ORDER BY created_at, id
+        LIMIT ${batchSize}
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING id, workspace_id, admin_user_ids, admin_email_payload, admin_email_attempts, admin_email_locked_at
+    `;
+    for (const row of claimed) {
+      handled.push(row.id);
+      try {
+        await sendAdminEmail(row, deps);
+      } catch (err) {
+        // Left locked; once the lock is stale a later pass claims it again.
+        console.error(`[notify] could not email about budget alert ${row.id}`, err);
+      }
     }
+    if (claimed.length < batchSize) return;
   }
 }
 

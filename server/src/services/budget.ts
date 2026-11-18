@@ -5,7 +5,6 @@ import { prisma } from "../lib/prisma.ts";
 import { roundUsd } from "../review/core/pricing/pricing.ts";
 import { listModelPrices } from "./modelPrices.ts";
 import type { BudgetPayload } from "./notifications.ts";
-import { digestTotals } from "./usage.ts";
 
 // Percentages of the monthly budget that are announced, each at most once a
 // month. 110 is the over-budget alert: spending the budget exactly is news on
@@ -24,28 +23,37 @@ export function monthLabel(month: Date): string {
   return month.toISOString().slice(0, 7);
 }
 
-// The same runs the Usage page counts, so an alert and the page agree.
+// The same runs the Usage page counts, so an alert and the page agree. Summed
+// in Postgres so a check reads one row, not every digest of the month: the
+// worker runs it for each budgeted workspace every pass, and the budget card on
+// each request. Keep it in step with totalsOf (usage.ts): cost.total and
+// unpricedCalls per model, each review rounded like roundUsd; digests from
+// before per-model usage carry no cost and add nothing.
 export async function monthSpend(
   workspaceId: string,
   now: Date,
   db: Prisma.TransactionClient = prisma,
 ): Promise<{ usd: number; unpricedCalls: number }> {
-  const jobs = await db.reviewJob.findMany({
-    where: {
-      repository: { connection: { workspaceId } },
-      createdAt: { gte: monthStart(now) },
-      status: { notIn: ["superseded", "skipped", "cancelled"] },
-    },
-    select: { summary: true },
-  });
-  let usd = 0;
-  let unpricedCalls = 0;
-  for (const job of jobs) {
-    const totals = digestTotals(job.summary);
-    usd += totals.usd;
-    unpricedCalls += totals.unpricedCalls;
-  }
-  return { usd: roundUsd(usd), unpricedCalls };
+  const [row] = await db.$queryRaw<{ usd: number; unpriced_calls: number }[]>`
+    SELECT COALESCE(SUM(job.usd), 0)::float8 AS usd,
+           COALESCE(SUM(job.unpriced), 0)::int AS unpriced_calls
+    FROM (
+      SELECT ROUND(COALESCE(SUM((u.value->'cost'->>'total')::numeric), 0), 6) AS usd,
+             COALESCE(SUM((u.value->>'unpricedCalls')::int), 0) AS unpriced
+      FROM review_jobs j
+      JOIN repositories r ON r.id = j.repository_id
+      JOIN forge_connections c ON c.id = r.connection_id
+      CROSS JOIN LATERAL jsonb_each(
+        CASE WHEN jsonb_typeof(j.summary->'usageByModel') = 'object'
+             THEN j.summary->'usageByModel' ELSE '{}'::jsonb END
+      ) u
+      WHERE c.workspace_id = ${workspaceId}::uuid
+        AND j.created_at >= ${monthStart(now)}
+        AND j.status::text NOT IN ('superseded', 'skipped', 'cancelled')
+      GROUP BY j.id
+    ) job
+  `;
+  return { usd: roundUsd(row?.usd ?? 0), unpricedCalls: row?.unpriced_calls ?? 0 };
 }
 
 export function percentOf(spend: number, budget: number): number {

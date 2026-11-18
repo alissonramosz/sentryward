@@ -35,7 +35,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   the models still unpriced and a warning when no target listens. The Usage
   page shows the same meter when a budget is set. New endpoints:
   `GET /api/settings/budget` and `PUT /api/settings/budget` (admins).
-  Retention deletes alert records after 400 days.
+  Retention deletes alert records after 400 days. The month's spend is summed
+  in the database, so a check reads one row however many reviews ran, and
+  admin emails are claimed 10 at a time so a long batch cannot outlive its
+  locks and be mailed twice.
 - A backlog of findings that shipped. When a pull or merge request merges,
   its findings that were still open, or ignored as "fix later", become
   repository-level backlog items (`backlog_items`, a new table) that outlive
