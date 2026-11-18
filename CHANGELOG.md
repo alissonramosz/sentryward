@@ -24,7 +24,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   to owners and admins when mail is configured (skipping anyone an email target
   with the event already reaches). The admin email is queued in the same
   transaction as the alert record (`admin_user_ids`, `admin_email_payload`,
-  `admin_email_attempts` and `admin_email_locked_at` on `budget_alerts`), so a
+  `admin_email_attempts` and `admin_email_locked_at` on `budget_alerts`;
+  `admin_user_ids` is `NOT NULL`, since the email claim never matches a NULL
+  recipient list), so a
   worker restart or SMTP failure cannot lose it: anyone whose email failed is
   retried on the next check, up to 5 attempts, until the month ends, and
   only while still an owner or admin. Webhooks get a `budget` body with the month,
