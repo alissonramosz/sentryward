@@ -313,9 +313,9 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   // The change being closed or merged is noticed whatever abortOnClose says,
   // for the backlog (the webhook may have missed it): with abortOnClose off
   // that costs one forge read per check until a close is seen, and the review
-  // still finishes. It is recorded once the run is done (recordSeenClose), not
-  // when seen: a merge promotes the change's findings once, so a run that
-  // finishes after the merge must have synced its own findings first.
+  // still finishes. It is recorded once the run is done (recordSeenClose); the
+  // worker applies the merge only when no review of the change is queued or
+  // running, so this run's findings are synced before they are promoted.
   let cancelledBy: "manual" | "closed" | "disabled" | "lost" | undefined;
   let seenClosed: "closed" | "merged" | undefined;
   const ownsClaim = async () => {
@@ -614,8 +614,8 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     }).catch(
       (err: unknown) => console.error(`[worker] could not sync findings for job ${job.id}`, err),
     );
-    // After the sync, so a merge promotes this run's findings and resolves the
-    // backlog with this run's result.
+    // After the sync. Applying waits for this job to leave "running", so the
+    // merge promotes this run's findings and resolves with this run's result.
     await recordSeenClose();
   }
 }

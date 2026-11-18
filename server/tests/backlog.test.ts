@@ -5,7 +5,14 @@ import { prisma } from "../src/lib/prisma.ts";
 import type { Prisma } from "../src/generated/prisma/client.ts";
 import type { ReviewResult } from "../src/review/core/models.ts";
 import type { ChangeDetails } from "../src/review/forge/types.ts";
-import { backlogTransitions, patchTouches, recordChangeState, type BacklogCandidate } from "../src/services/backlog.ts";
+import {
+  applyMerge,
+  applyPendingMerges,
+  backlogTransitions,
+  patchTouches,
+  recordChangeState,
+  type BacklogCandidate,
+} from "../src/services/backlog.ts";
 import { sweepClosedChanges } from "../src/worker/backlogSweep.ts";
 import { pruneBacklog, purgeStaleChanges } from "../src/worker/retention.ts";
 import { sampleResult } from "./helpers/result.ts";
@@ -66,7 +73,6 @@ const candidate = (overrides: Partial<BacklogCandidate> = {}): BacklogCandidate 
   file: "src/app.ts",
   startLine: 21,
   endLine: 21,
-  baseBranch: "main",
   ...overrides,
 });
 
@@ -96,7 +102,13 @@ async function job(number: number, stored: ReviewResult, createdAt = new Date())
   });
 }
 
-const merge = (number: number) => recordChangeState({ repositoryId: repoId, number, state: "merged", baseBranch: "main" });
+// Records a merge and applies it, as the webhook and then the worker would.
+const record = (number: number, closedAt?: Date) =>
+  recordChangeState({ repositoryId: repoId, number, state: "merged", baseBranch: "main", closedAt });
+async function merge(number: number, closedAt?: Date) {
+  await record(number, closedAt);
+  return applyMerge(repoId, number);
+}
 const items = () => prisma.backlogItem.findMany({ orderBy: { fingerprint: "asc" } });
 
 beforeEach(async () => {
@@ -150,18 +162,33 @@ describe("backlogTransitions", () => {
     expect(backlogTransitions([candidate()], renamed).invalidated).toEqual(["fp1"]);
   });
 
-  it("resolves nothing it cannot see: other lines, unread files, no patch, another branch, a failed run", () => {
+  it("resolves nothing it cannot see: other lines, unread files, no patch, a failed run", () => {
     const none = { fixed: [], invalidated: [], seenAgain: [] };
     const touched = result({}, [modified("src/app.ts", REWRITE_21)]);
     expect(backlogTransitions([candidate({ startLine: 5, endLine: 8 })], touched)).toEqual(none);
     expect(backlogTransitions([candidate()], { ...touched, coverage: { ...touched.coverage, reviewedFiles: [] } })).toEqual(none);
     expect(backlogTransitions([candidate()], result({}, [modified("src/app.ts")]))).toEqual(none);
-    expect(backlogTransitions([candidate({ baseBranch: "release" })], touched)).toEqual(none);
     expect(backlogTransitions([candidate()], { ...touched, status: "failed" })).toEqual(none);
+  });
+
+  it("fixes nothing when findings were cut, but still invalidates", () => {
+    const capped = { ...base.validation, dropped: { over_limit: 3 } };
+    const touched = result({ validation: capped }, [modified("src/app.ts", REWRITE_21)]);
+    expect(backlogTransitions([candidate()], touched)).toEqual({ fixed: [], invalidated: [], seenAgain: [] });
+    const deleted = result({ validation: capped }, [{ path: "src/app.ts", changeType: "deleted", additions: 0, deletions: 30 }]);
+    expect(backlogTransitions([candidate()], deleted).invalidated).toEqual(["fp1"]);
+  });
+
+  it("does not fix an item reported at the same place under another fingerprint, or ignored on the change", () => {
+    const twin = { ...base.findings[0]!, fingerprint: "fp-twin", file: "src/app.ts", startLine: 20, endLine: 22 };
+    const none = { fixed: [], invalidated: [], seenAgain: [] };
+    expect(backlogTransitions([candidate()], result({ findings: [twin] }, [modified("src/app.ts", REWRITE_21)]))).toEqual(none);
+    const touched = result({}, [modified("src/app.ts", REWRITE_21)]);
+    expect(backlogTransitions([candidate()], touched, { ignored: new Set(["fp1"]) })).toEqual(none);
   });
 });
 
-describe("recordChangeState", () => {
+describe("recording and applying a merge", () => {
   it("promotes open and fix-later findings when a change merges, and nothing else", async () => {
     await finding(7, "fp-open");
     await finding(7, "fp-later", { state: "ignored", ignoreReason: "fix_later", ignoreNote: "after launch" });
@@ -183,7 +210,8 @@ describe("recordChangeState", () => {
     await finding(8, "fp-closed");
     await merge(7);
     expect(await merge(7)).toBeNull();
-    expect(await recordChangeState({ repositoryId: repoId, number: 8, state: "closed" })).toBeNull();
+    expect(await recordChangeState({ repositoryId: repoId, number: 8, state: "closed" })).toBe(false);
+    expect(await applyMerge(repoId, 8)).toBeNull();
     expect((await items()).map((item) => item.fingerprint)).toEqual(["fp-open"]);
   });
 
@@ -224,9 +252,11 @@ describe("recordChangeState", () => {
     const real = prisma.$transaction.bind(prisma) as (fn: (tx: Prisma.TransactionClient) => Promise<unknown>, opts?: unknown) => Promise<unknown>;
     const spy = vi.spyOn(prisma, "$transaction").mockImplementation(((fn: (tx: Prisma.TransactionClient) => Promise<unknown>, opts?: unknown) =>
       real(async (tx) => {
-        const read = tx.backlogItem.findUnique.bind(tx.backlogItem);
-        (tx.backlogItem as { findUnique: unknown }).findUnique = async (args: never) => {
-          const item = await read(args);
+        const read = tx.backlogItem.findMany.bind(tx.backlogItem);
+        (tx.backlogItem as { findMany: unknown }).findMany = async (args: { where?: { fingerprint?: unknown } }) => {
+          const item = await read(args as never);
+          // Only promotion's read of existing items looks them up by fingerprint.
+          if (!args.where?.fingerprint) return item;
           await prisma.backlogItem.updateMany({
             where: { fingerprint: "fp-race" },
             data: { state: "dismissed", dismissedAt: new Date(), dismissNote: "won't fix" },
@@ -235,9 +265,10 @@ describe("recordChangeState", () => {
         };
         return fn(tx);
       }, opts)) as never);
+    await record(9);
     let outcome;
     try {
-      outcome = await merge(9);
+      outcome = await applyMerge(repoId, 9);
     } finally {
       spy.mockRestore();
     }
@@ -245,6 +276,50 @@ describe("recordChangeState", () => {
     expect(outcome!.promoted).toBe(0);
     const [item] = await items();
     expect(item).toMatchObject({ state: "dismissed", dismissNote: "won't fix", sourceNumber: 7 });
+  });
+});
+
+describe("applyPendingMerges", () => {
+  it("waits for a review still running when the change merged, then applies its result", async () => {
+    await finding(7, "fp-old");
+    await merge(7);
+    // Change 8 merged while its review was running (abortOnClose off).
+    await finding(8, "fp-before");
+    const running = await prisma.reviewJob.create({
+      data: { repositoryId: repoId, number: 8, headSha: "head", trigger: "manual", status: "running" },
+    });
+    expect(await record(8)).toBe(true);
+    expect(await applyPendingMerges()).toEqual({ applied: 0, promoted: 0, resolved: 0, failed: 0 });
+    expect((await items()).map((item) => item.fingerprint)).toEqual(["fp-old"]);
+
+    // The run finishes: its sync resolved fp-before, raised fp-after, and its diff fixed fp-old.
+    await prisma.finding.updateMany({ where: { number: 8, fingerprint: "fp-before" }, data: { state: "resolved", lifecycle: "fixed" } });
+    await finding(8, "fp-after");
+    await prisma.reviewJob.update({
+      where: { id: running.id },
+      data: { status: "completed", result: result({}, [modified("src/app.ts", REWRITE_21)]) },
+    });
+    expect(await applyPendingMerges()).toEqual({ applied: 1, promoted: 1, resolved: 1, failed: 0 });
+    expect((await items()).map((item) => [item.fingerprint, item.state])).toEqual([
+      ["fp-after", "open"],
+      ["fp-old", "resolved"],
+    ]);
+    expect(await prisma.changeState.findFirst({ where: { number: 8 } })).toMatchObject({ appliedJobId: running.id });
+    // Applied once.
+    expect((await applyPendingMerges()).applied).toBe(0);
+  });
+
+  it("replays a later merge against the items of an earlier merge applied late", async () => {
+    const early = new Date("2026-11-10T09:00:00Z");
+    const later = new Date("2026-11-11T09:00:00Z");
+    // B merged second but was applied first; it rewrote line 21.
+    const reviewed = await job(8, result({}, [modified("src/app.ts", REWRITE_21)]));
+    expect(await merge(8, later)).toEqual({ promoted: 0, fixed: 0, invalidated: 0 });
+    // A, with a finding on line 21, is found by the sweep afterwards.
+    await finding(7, "fp-a");
+    expect(await merge(7, early)).toEqual({ promoted: 1, fixed: 1, invalidated: 0 });
+    const [item] = await items();
+    expect(item).toMatchObject({ fingerprint: "fp-a", state: "resolved", resolution: "fixed", resolvedNumber: 8, resolvedJobId: reviewed.id });
   });
 });
 
@@ -277,6 +352,9 @@ describe("sweepClosedChanges", () => {
     });
     expect(await sweepClosedChanges({ now, forgeFor })).toEqual({ checked: 2, merged: 1, failed: 0 });
     expect(asked.sort()).toEqual([7, 8]);
+    // Recorded only; the worker applies it.
+    expect(await items()).toEqual([]);
+    expect((await applyPendingMerges()).applied).toBe(1);
     expect((await items()).map((item) => [item.fingerprint, item.mergedAt.toISOString()])).toEqual([
       ["fp-merged", "2026-11-18T09:00:00.000Z"],
     ]);
@@ -297,11 +375,34 @@ describe("sweepClosedChanges", () => {
     expect(await sweepClosedChanges({ now, forgeFor })).toEqual({ checked: 0, merged: 0, failed: 1 });
     expect(await sweepClosedChanges({ now: new Date(now.getTime() + HOUR_MS), forgeFor })).toEqual({ checked: 0, merged: 0, failed: 0 });
   });
+
+  it("skips a repository deleted mid-sweep and checks the rest", async () => {
+    const otherRepo = await createRepo(workspaceId, "team/api");
+    const quiet = new Date(now.getTime() - 2 * HOUR_MS);
+    await finding(7, "fp-gone", { lastSeenAt: quiet });
+    await prisma.finding.create({
+      data: {
+        repositoryId: otherRepo, number: 3, fingerprint: "fp-kept", title: "t", file: "a.ts", startLine: 1, endLine: 1,
+        severity: "minor", category: "bug", kind: "issue", changeTitle: "c", lastSeenAt: quiet,
+      },
+    });
+    // The repository disappears between the candidate query and the lookup.
+    const real = prisma.repository.findMany.bind(prisma.repository);
+    const spy = vi.spyOn(prisma.repository, "findMany").mockImplementation((async (args: never) =>
+      (await real(args)).filter((repo) => repo.id !== repoId)) as never);
+    const forgeFor = () => ({ getChangeDetails: async () => details("open") });
+    try {
+      expect(await sweepClosedChanges({ now, forgeFor })).toEqual({ checked: 1, merged: 0, failed: 0 });
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("pruneBacklog", () => {
-  it("deletes items resolved or dismissed before the window and keeps open ones", async () => {
+  it("deletes resolved and long-unseen open items, and scrubs old dismissals", async () => {
     await finding(7, "fp-open");
+    await finding(7, "fp-stale");
     await finding(7, "fp-resolved");
     await finding(7, "fp-recent");
     await finding(7, "fp-dismissed");
@@ -309,11 +410,25 @@ describe("pruneBacklog", () => {
     const old = new Date(Date.now() - 40 * DAY_MS);
     await prisma.backlogItem.updateMany({ where: { fingerprint: "fp-resolved" }, data: { state: "resolved", resolvedAt: old } });
     await prisma.backlogItem.updateMany({ where: { fingerprint: "fp-recent" }, data: { state: "resolved", resolvedAt: new Date() } });
-    await prisma.backlogItem.updateMany({ where: { fingerprint: "fp-dismissed" }, data: { state: "dismissed", dismissedAt: old } });
+    await prisma.backlogItem.updateMany({
+      where: { fingerprint: "fp-dismissed" },
+      data: { state: "dismissed", dismissedAt: old, dismissNote: "module going away" },
+    });
+    // Merged long ago, but a later review saw it recently: kept.
     await prisma.backlogItem.updateMany({ where: { fingerprint: "fp-open" }, data: { mergedAt: old, firstSeenAt: old } });
+    await prisma.backlogItem.updateMany({ where: { fingerprint: "fp-stale" }, data: { mergedAt: old, firstSeenAt: old, lastSeenAt: old } });
 
-    expect(await pruneBacklog(30)).toBe(2);
-    expect((await items()).map((item) => item.fingerprint)).toEqual(["fp-open", "fp-recent"]);
+    expect(await pruneBacklog(30)).toEqual({ deleted: 2, scrubbed: 1 });
+    expect((await items()).map((item) => item.fingerprint)).toEqual(["fp-dismissed", "fp-open", "fp-recent"]);
+    const [tombstone] = await items();
+    expect(tombstone).toMatchObject({ state: "dismissed", title: "", file: "", author: null, dismissNote: null });
+    expect(tombstone!.scrubbedAt).not.toBeNull();
+    expect(await pruneBacklog(30)).toEqual({ deleted: 0, scrubbed: 0 });
+
+    // The dismissal still holds when the problem ships again.
+    await finding(9, "fp-dismissed");
+    expect((await merge(9))!.promoted).toBe(0);
+    expect((await items())[0]).toMatchObject({ fingerprint: "fp-dismissed", state: "dismissed", title: "" });
   });
 });
 
@@ -329,6 +444,21 @@ describe("purgeStaleChanges", () => {
     await prisma.changeState.create({ data: { repositoryId: repoId, number: 7, state: "open", checkedAt: new Date() } });
     expect((await purgeStaleChanges(30)).changes).toBe(1);
     expect(await count()).toBe(0);
+  });
+
+  it("waits for a recorded merge to be applied, and keeps the merged state when it purges", async () => {
+    const old = new Date(Date.now() - 40 * DAY_MS);
+    await finding(7, "fp", { firstSeenAt: old, lastSeenAt: old });
+    await record(7, old);
+    expect((await purgeStaleChanges(30)).changes).toBe(0);
+
+    expect((await applyMerge(repoId, 7))!.promoted).toBe(1);
+    expect((await purgeStaleChanges(30)).changes).toBe(1);
+    expect(await prisma.changeState.findFirst({ select: { state: true } })).toEqual({ state: "merged" });
+    // A rerun, sweep or redelivered webhook afterwards does not apply it again.
+    await prisma.backlogItem.updateMany({ data: { state: "resolved", resolution: "fixed" } });
+    expect(await merge(7)).toBeNull();
+    expect((await items())[0]).toMatchObject({ state: "resolved" });
   });
 
   it("does not wait for a sweep that will never check the change", async () => {
@@ -406,5 +536,18 @@ describe("/api/backlog", () => {
     expect((await request(app).get(`/api/backlog/${item!.id}`).set("Cookie", other.cookie)).status).toBe(404);
     expect((await request(app).patch(`/api/backlog/${item!.id}`).set("Cookie", other.cookie).send({ state: "open" })).status).toBe(404);
     expect((await request(app).get("/api/backlog").set("Cookie", other.cookie)).body.total).toBe(0);
+  });
+  it("hides retention tombstones from the list, stats, detail and updates", async () => {
+    await seed();
+    const [item] = await items();
+    await prisma.backlogItem.update({
+      where: { id: item!.id },
+      data: { state: "dismissed", dismissedAt: new Date(), scrubbedAt: new Date(), title: "", file: "" },
+    });
+    expect((await request(app).get("/api/backlog").set("Cookie", cookie)).body.total).toBe(1);
+    expect((await request(app).get("/api/backlog?state=dismissed").set("Cookie", cookie)).body.total).toBe(0);
+    expect((await request(app).get("/api/backlog/stats").set("Cookie", cookie)).body.open).toBe(1);
+    expect((await request(app).get(`/api/backlog/${item!.id}`).set("Cookie", cookie)).status).toBe(404);
+    expect((await request(app).patch(`/api/backlog/${item!.id}`).set("Cookie", cookie).send({ state: "open" })).status).toBe(404);
   });
 });

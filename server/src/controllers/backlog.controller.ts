@@ -37,8 +37,10 @@ const listFields = {
   repository: { select: { id: true, provider: true, host: true, fullPath: true } },
 } as const;
 
+// Retention tombstones (scrubbed dismissed items) only keep a dismissal
+// holding; they have no text to show and are never listed, opened or reopened.
 function ownedBy(workspaceId: string) {
-  return { repository: { connection: { workspaceId } } };
+  return { repository: { connection: { workspaceId } }, scrubbedAt: null };
 }
 
 type ListQuery = ReturnType<typeof listBacklogQuerySchema.parse>;

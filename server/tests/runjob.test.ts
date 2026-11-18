@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { prisma } from "../src/lib/prisma.ts";
+import { applyPendingMerges } from "../src/services/backlog.ts";
 import type { IssueContext, ReviewResult, ToolAnnotation } from "../src/review/core/models.ts";
 import { ForgeCache } from "../src/review/forge/cache.ts";
 import { ForgeError } from "../src/review/forge/http.ts";
@@ -891,7 +892,9 @@ describe("runJob when the change closes", () => {
     expect(await prisma.changeState.findMany({ select: { number: true, state: true } })).toEqual([
       { number: job.number, state: "merged" },
     ]);
-    // Promoted from this run's findings, which only exist once the run synced them.
+    // Applied by the worker once the job is no longer running, from this run's
+    // findings, which only exist once the run synced them.
+    expect((await applyPendingMerges()).applied).toBe(1);
     const promoted = await prisma.backlogItem.findMany({ select: { fingerprint: true } });
     const synced = await prisma.finding.findMany({ select: { fingerprint: true } });
     expect(synced.length).toBeGreaterThan(0);

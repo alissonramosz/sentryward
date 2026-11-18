@@ -591,8 +591,9 @@ enum ChangeStateValue {
 
 // What Sentryward last learned about whether a change is still open: from a
 // close or merge webhook, a review that found it closed, or the backlog sweep
-// asking the forge. A merge is processed into the backlog once, when the row
-// first becomes merged; a merged change cannot be reopened.
+// asking the forge. A merge is applied to the backlog once (mergeAppliedAt);
+// a merged change cannot be reopened. Retention keeps merged rows, so a merge
+// is never applied twice.
 model ChangeState {
   id           String           @id @default(uuid()) @db.Uuid
   repositoryId String           @map("repository_id") @db.Uuid
@@ -603,10 +604,19 @@ model ChangeState {
   closedAt     DateTime?        @map("closed_at") @db.Timestamptz
   // When the forge was last asked (or told us); the sweep re-asks after a while.
   checkedAt    DateTime         @default(now()) @map("checked_at") @db.Timestamptz
+  // A merge is recorded first (cheap, from a webhook, review or sweep) and
+  // applied to the backlog later by the worker, once no review of the change
+  // is queued or running. Set when it was applied; null on a merge still waiting.
+  mergeAppliedAt DateTime?      @map("merge_applied_at") @db.Timestamptz
+  // The review whose result the merge was applied from, so a merge applied
+  // late can be replayed against the ones applied after it. No relation:
+  // retention deletes job rows, and this only needs to find one if it is still there.
+  appliedJobId   String?        @map("applied_job_id") @db.Uuid
 
   repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
 
   @@unique([repositoryId, number])
+  @@index([state, mergeAppliedAt])
   @@map("change_states")
 }
 
@@ -642,7 +652,8 @@ enum BacklogOrigin {
 // outlives the change's own rows (retention purges those) and the same problem
 // merged twice is one item. "resolved" belongs to the merge step, which only
 // counts merged work as a fix; "dismissed" is only ever set by a person and
-// survives later merges, like an ignored finding.
+// survives later merges, like an ignored finding. Retention deletes resolved
+// items and open ones not seen within the window, and scrubs dismissed ones.
 model BacklogItem {
   id                String             @id @default(uuid()) @db.Uuid
   repositoryId      String             @map("repository_id") @db.Uuid
@@ -682,6 +693,10 @@ model BacklogItem {
   lastSeenAt        DateTime           @map("last_seen_at") @db.Timestamptz
   createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz
   updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz
+  // Set when retention reduced a long-dismissed item to a tombstone: its text
+  // (title, file, author, notes) is cleared and it is hidden from the API, but
+  // the row stays so the dismissal still holds if the problem ships again.
+  scrubbedAt        DateTime?          @map("scrubbed_at") @db.Timestamptz
 
   repository  Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   resolvedJob ReviewJob? @relation(fields: [resolvedJobId], references: [id], onDelete: SetNull)

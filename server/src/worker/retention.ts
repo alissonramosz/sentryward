@@ -127,7 +127,8 @@ export interface PurgeResult {
 // the backlog could still take waits until the backlog sweep has asked the
 // forge whether it merged (a failed check counts, so a broken forge delays it
 // by one check, not for good), unless the sweep never will: the repository is
-// turned off or its access is gone. Otherwise a worker down for longer than the
+// turned off or its access is gone, and a merge recorded but not yet applied
+// waits for the worker to apply it. Otherwise a worker down for longer than the
 // window would purge merges it had not yet seen.
 export async function purgeStaleChanges(
   days: number,
@@ -147,9 +148,11 @@ export async function purgeStaleChanges(
           where: { ...where, resultExpiredAt: null, finishedAt: { lt: cutoff }, status: { in: TRIMMED } },
           data: { result: Prisma.DbNull, resolvedConfig: Prisma.DbNull, publication: Prisma.DbNull, resultExpiredAt: now },
         }),
-        // What the backlog knew about it being open or merged; its backlog
-        // items belong to the repository and stay.
-        prisma.changeState.deleteMany({ where }),
+        // What the backlog knew about it being open or closed; its backlog
+        // items belong to the repository and stay. A merged row stays too: it
+        // is the record that the merge was applied, so a later rerun, sweep or
+        // redelivered webhook does not apply it again.
+        prisma.changeState.deleteMany({ where: { ...where, state: { not: "merged" } } }),
       ]);
       total.changes++;
       total.findings += findings.count;
@@ -187,8 +190,9 @@ async function staleChanges(cutoff: Date, batchSize: number, workspaceIds?: stri
         SELECT 1 FROM thread_replies t
         WHERE t.repository_id = c.repository_id AND t.number = c.number AND t.status IN ('queued', 'running')
       )
-      -- Unaddressed findings the backlog sweep could still promote, on a change
-      -- it has not asked the forge about since they were last seen.
+      -- Unaddressed findings the backlog could still promote: on a change the
+      -- sweep has not asked the forge about since they were last seen, or one
+      -- recorded as merged that the worker has not applied yet.
       AND NOT EXISTS (
         SELECT 1 FROM findings f
         JOIN repositories r ON r.id = f.repository_id
@@ -197,7 +201,11 @@ async function staleChanges(cutoff: Date, batchSize: number, workspaceIds?: stri
         WHERE f.repository_id = c.repository_id AND f.number = c.number
           AND (f.state = 'open' OR (f.state = 'ignored' AND f.ignore_reason = 'fix_later'))
           AND r.enabled AND r.access_lost_at IS NULL AND fc.credentials_rejected_at IS NULL
-          AND (s.id IS NULL OR (s.state <> 'merged' AND s.checked_at < f.last_seen_at))
+          AND (
+            s.id IS NULL
+            OR (s.state = 'merged' AND s.merge_applied_at IS NULL)
+            OR (s.state <> 'merged' AND s.checked_at < f.last_seen_at)
+          )
       )
       AND (
         EXISTS (SELECT 1 FROM findings f WHERE f.repository_id = c.repository_id AND f.number = c.number)
@@ -216,32 +224,62 @@ async function staleChanges(cutoff: Date, batchSize: number, workspaceIds?: stri
   `;
 }
 
-// Backlog items a merge resolved, or a person dismissed, longer ago than the
-// window. Open items are the backlog itself and stay until they are resolved
-// or dismissed: they outlive the change they came from on purpose. The backlog
-// sweep checks quiet changes every few hours, so a merge is found and its
-// findings promoted long before purgeStaleChanges deletes them.
+// Backlog items past the window. Resolved ones are deleted by when they were
+// resolved, and open ones once neither their merge nor any review since has
+// been within the window: an item nobody has seen for that long goes with the
+// rest of what retention purges. A dismissal is a person's decision that must
+// keep holding if the problem ships again, so a dismissed item is not deleted
+// but scrubbed: its code-derived text and notes are cleared, the API stops
+// showing it, and only the fingerprint and state remain.
 export async function pruneBacklog(
   days: number,
   { now = new Date(), batchSize = 1000, workspaceIds }: PruneOptions = {},
-): Promise<number> {
+): Promise<{ deleted: number; scrubbed: number }> {
   const cutoff = new Date(now.getTime() - days * DAY_MS);
-  const where: Prisma.BacklogItemWhereInput = {
+  const scope: Prisma.BacklogItemWhereInput = workspaceIds
+    ? { repository: { connection: { workspaceId: { in: workspaceIds } } } }
+    : {};
+  const stale: Prisma.BacklogItemWhereInput = {
+    ...scope,
     OR: [
       { state: "resolved", resolvedAt: { lt: cutoff } },
-      { state: "dismissed", dismissedAt: { lt: cutoff } },
+      { state: "open", lastSeenAt: { lt: cutoff }, mergedAt: { lt: cutoff } },
     ],
-    ...(workspaceIds ? { repository: { connection: { workspaceId: { in: workspaceIds } } } } : {}),
   };
+  const unscrubbed: Prisma.BacklogItemWhereInput = { ...scope, state: "dismissed", dismissedAt: { lt: cutoff }, scrubbedAt: null };
   let deleted = 0;
+  let scrubbed = 0;
   for (;;) {
-    const rows = await prisma.backlogItem.findMany({ where, select: { id: true }, take: batchSize });
+    const rows = await prisma.backlogItem.findMany({ where: stale, select: { id: true }, take: batchSize });
     if (rows.length) {
       deleted += (await prisma.backlogItem.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } })).count;
     }
     if (rows.length < batchSize) break;
   }
-  return deleted;
+  for (;;) {
+    const rows = await prisma.backlogItem.findMany({ where: unscrubbed, select: { id: true }, take: batchSize });
+    if (rows.length) {
+      scrubbed += (
+        await prisma.backlogItem.updateMany({
+          // Checked again: a reopen between the read and this write keeps its text.
+          where: { id: { in: rows.map((row) => row.id) }, state: "dismissed", scrubbedAt: null },
+          data: {
+            title: "",
+            sourceChangeTitle: "",
+            file: "",
+            author: null,
+            ignoreNote: null,
+            dismissNote: null,
+            ruleId: null,
+            model: null,
+            scrubbedAt: now,
+          },
+        })
+      ).count;
+    }
+    if (rows.length < batchSize) break;
+  }
+  return { deleted, scrubbed };
 }
 
 export interface RetentionResult extends PruneResult, PurgeResult {
@@ -249,6 +287,7 @@ export interface RetentionResult extends PruneResult, PurgeResult {
   oauthStates: number;
   deliveries: number;
   backlogItems: number;
+  backlogScrubbed: number;
 }
 
 // The delivery log answers "is this target working", so recent rows are all it
@@ -330,6 +369,7 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     oauthStates: 0,
     deliveries: 0,
     backlogItems: 0,
+    backlogScrubbed: 0,
   };
   for (const [days, workspaceIds] of byDays) {
     const pruned = await pruneReviews(days, { now, workspaceIds });
@@ -340,7 +380,9 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     result.findings += purged.findings;
     result.postedFindings += purged.postedFindings;
     result.replies += purged.replies;
-    result.backlogItems += await pruneBacklog(days, { now, workspaceIds });
+    const backlog = await pruneBacklog(days, { now, workspaceIds });
+    result.backlogItems += backlog.deleted;
+    result.backlogScrubbed += backlog.scrubbed;
     if (days < DELIVERY_RETENTION_DAYS) {
       result.deliveries += await pruneDeliveries(days, { now, workspaceIds });
     }

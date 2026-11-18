@@ -83,7 +83,9 @@ export const gitlabProvider: ProviderDefinition = {
       if (event === "Merge Request Hook" && (attrs.action === "close" || attrs.action === "merge") && attrs.iid) {
         const cancelled = await cancelQueuedForClosedChange(repo, attrs.iid);
         // Whatever abortOnClose says: a merge moves the change's findings into
-        // the backlog. Not swallowed, so GitLab retries on a failure; it is idempotent.
+        // the backlog. Only recorded here (one upsert); the worker applies it
+        // once no review of the change is running. A failure fails the
+        // delivery, and the sweep finds the merge either way.
         await recordChangeState({
           repositoryId: repo.id,
           number: attrs.iid,

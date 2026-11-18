@@ -154,7 +154,9 @@ export async function handleGithubEvent(
     const pull = payload.pull_request!;
     const cancelled = await cancelQueuedForClosedChange(repo, pull.number);
     // Whatever abortOnClose says: a merge moves the change's findings into the
-    // backlog. Not swallowed, so GitHub redelivers on a failure; it is idempotent.
+    // backlog. Only recorded here (one upsert); the worker applies it once no
+    // review of the change is running. A failure fails the delivery, which can
+    // be redelivered, and the sweep finds the merge either way.
     const at = pull.merged ? pull.merged_at : pull.closed_at;
     await recordChangeState({
       repositoryId: repo.id,

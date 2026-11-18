@@ -44,6 +44,7 @@ export async function sweepClosedChanges({
     LEFT JOIN change_states s ON s.repository_id = f.repository_id AND s.number = f.number
     WHERE (f.state = 'open' OR (f.state = 'ignored' AND f.ignore_reason = 'fix_later'))
       AND r.enabled AND r.access_lost_at IS NULL AND c.credentials_rejected_at IS NULL
+      -- A merge already recorded is the applier's (backlog.ts), not the sweep's.
       AND (s.id IS NULL OR (s.state <> 'merged' AND s.checked_at < ${recheck}))
       AND NOT EXISTS (
         SELECT 1 FROM review_jobs j
@@ -64,7 +65,9 @@ export async function sweepClosedChanges({
   });
   const byId = new Map(repos.map((repo) => [repo.id, repo]));
   for (const { repository_id: repositoryId, number } of candidates) {
-    const repo = byId.get(repositoryId)!;
+    const repo = byId.get(repositoryId);
+    // Deleted since the candidate query: its findings went with it.
+    if (!repo) continue;
     try {
       const details = await forgeFor(repo.connection).getChangeDetails(repo.fullPath, number);
       result.checked++;
@@ -73,14 +76,15 @@ export async function sweepClosedChanges({
         continue;
       }
       const at = details.state === "merged" ? details.mergedAt : details.closedAt;
-      const outcome = await recordChangeState({
+      const recorded = await recordChangeState({
         repositoryId,
         number,
         state: details.state,
         baseBranch: details.targetBranch,
         closedAt: at ? new Date(at) : null,
       });
-      if (outcome) result.merged++;
+      // Recorded only; the worker applies it (applyPendingMerges).
+      if (recorded) result.merged++;
     } catch (err) {
       // A flaky forge or a change it no longer knows: asked again after the
       // recheck period rather than every pass.

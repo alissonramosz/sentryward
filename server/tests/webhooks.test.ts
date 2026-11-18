@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { app } from "../src/app.ts";
 import { encrypt } from "../src/lib/crypto.ts";
 import { prisma } from "../src/lib/prisma.ts";
+import { applyPendingMerges } from "../src/services/backlog.ts";
 import { parseReviewCommand } from "../src/lib/webhook.ts";
 import { MAX_FOCUS } from "../src/review/core/models.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
@@ -289,6 +290,9 @@ describe("POST /api/webhooks/github", () => {
     expect((await sendGithub("pull_request", closed(42, true))).body.outcome).toBe("closed");
     // A redelivery adds nothing.
     await sendGithub("pull_request", closed(42, true));
+    // The webhook only records the merge; the worker applies it.
+    expect(await prisma.backlogItem.count()).toBe(0);
+    expect((await applyPendingMerges()).applied).toBe(1);
     expect(await prisma.backlogItem.findMany({ select: { fingerprint: true, baseBranch: true, mergedAt: true } })).toEqual([
       { fingerprint: "fp1", baseBranch: "develop", mergedAt: new Date("2026-11-18T09:00:00Z") },
     ]);
@@ -597,6 +601,8 @@ describe("POST /api/webhooks/gitlab/:repoId", () => {
     await sendGitlab(repo.id, "Merge Request Hook", mrEvent("close", { iid: 8 }));
     expect(await prisma.backlogItem.count()).toBe(0);
     await sendGitlab(repo.id, "Merge Request Hook", mrEvent("merge", { target_branch: "main" }));
+    expect(await prisma.backlogItem.count()).toBe(0);
+    expect((await applyPendingMerges()).applied).toBe(1);
     expect(await prisma.backlogItem.findMany({ select: { fingerprint: true, sourceNumber: true, baseBranch: true } })).toEqual([
       { fingerprint: "fp1", sourceNumber: 7, baseBranch: "main" },
     ]);
