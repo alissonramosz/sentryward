@@ -10,6 +10,41 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- A backlog of findings that shipped. When a pull or merge request merges,
+  its findings that were still open, or ignored as "fix later", become
+  repository-level backlog items (`backlog_items`, a new table) that outlive
+  the change's own findings. A change closed without merging adds nothing.
+  At the same merge, earlier open items on the branch it merged into are
+  resolved from the change's latest stored review: fixed when the review read
+  the file, the diff removed or rewrote one of the item's lines (or inserted
+  between them) and the finding was not reported again; invalidated when the
+  file was deleted or renamed. A resolved item that ships again reopens; a
+  dismissed one stays dismissed, even when it is dismissed while the merge is
+  being processed. Nothing is marked fixed when the review cut findings over
+  `review.maxFindings`, reported a finding on the same lines, or the finding
+  was ignored on that change. Merges are recorded from the GitHub and GitLab
+  close webhooks (now acted on whatever `abortOnClose` says), from a review
+  that sees its change merge while it runs (whatever `abortOnClose` says),
+  and from a worker sweep that asks the forge about quiet changes with
+  unaddressed findings every few hours, so a missed webhook is caught before
+  retention purges the findings (`change_states`, a new table, records what
+  is known). The worker applies recorded merges, oldest first, once no review
+  of the change is queued or running, so webhooks stay fast and a review still
+  running at merge time has its findings counted; a merge applied late is
+  replayed against later merges into the same branch. A merge first seen
+  without a merge time (by a running review, or a GitLab webhook) takes the
+  forge's time, and a missing target branch, from a later webhook or sweep. A new **Backlog** page lists items with filters for state,
+  origin, severity, category, type, age and repository, a stats strip (open
+  items by severity and age, for the selected repository), and dismiss (with an optional note) and reopen
+  actions, backed by `GET /api/backlog`, `GET /api/backlog/stats`,
+  `GET /api/backlog/:id` and `PATCH /api/backlog/:id`. Retention deletes
+  items resolved longer ago than the period and open items neither merged nor
+  seen within it, and scrubs items dismissed longer ago (text cleared, hidden
+  from the API) so the dismissal still holds. It holds back purging a change's
+  unaddressed findings until the sweep has asked the forge whether it merged
+  (unless the repository is turned off or its access is gone) and until a
+  recorded merge is applied, and keeps a change's merged state, so a worker
+  outage longer than the period loses no merges and none is applied twice.
 - A focus for a single review: `/sentryward review focus on <area>` (or
   `focus: <area>`) asks that run to look hardest at the area named, while
   still reporting real problems elsewhere. The rest of the command's line is

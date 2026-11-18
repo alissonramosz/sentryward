@@ -51,6 +51,7 @@ statuses. The dashboard tracks reviews and findings across runs.
 - **Reviews on the forge:**
   [publishing](#publishing-to-the-forge) ·
   [replying to findings](#replying-to-findings) ·
+  [backlog](#backlog) ·
   [automatic reviews](#automatic-reviews) ·
   [notifications](#notifications)
 - **[Review configuration](#review-configuration):**
@@ -92,6 +93,9 @@ statuses. The dashboard tracks reviews and findings across runs.
   Ignore findings as false positives, intentional, or fix later, and track the
   false-positive rate on the dashboard, broken down by category, severity and
   model, with a pointer to the setting that would quiet the noisiest ones.
+- **Backlog of shipped findings:** findings still open (or ignored as fix
+  later) when a change merges move to a repository backlog, and a later merged
+  change that fixes them resolves them. See [Backlog](#backlog).
 - **Teams:** share connections, repositories, reviews and model keys in team
   workspaces, with owner, admin and member roles and one-time invite links,
   managed from **Team settings** in the workspace switcher.
@@ -744,6 +748,46 @@ Rules and limits:
   hooks registered before this existed get it when the repository is disabled
   and enabled again. GitLab delivers diff thread notes through the note events
   its hook already subscribes to.
+
+## Backlog
+
+The **Backlog** page lists findings that shipped: still open, or ignored as
+"fix later", when their pull or merge request merged. A change closed without
+merging adds nothing, since its code never reached the repository. Items
+belong to the repository, not the change, so they outlive the change's own
+findings (which [retention](#retention) purges once the change goes quiet),
+and the same problem shipped twice is one item.
+
+- **When a change merges**, the merge is recorded from the close webhook, from
+  a review that sees the change merge while it runs, or (if those were missed)
+  from a worker check that asks the forge about quiet changes every few hours.
+  The worker then applies it, oldest merge first, as soon as no review of the
+  change is queued or running, so a review still running when the change
+  merged has its findings counted. It reads the change's latest stored review
+  and, in this order:
+  1. **Resolves earlier items** on the branch it merged into. An item is
+     **fixed** when that review read the item's file, the change removed or
+     rewrote one of the item's lines (or inserted code between them), and the
+     review did not report the item again. It is **invalidated** when the
+     change deleted or renamed the file. Reported again, it stays open. Nothing
+     is marked fixed when the review cut findings over `review.maxFindings`, a
+     finding was reported on the same lines, or the finding was ignored on
+     that change, since the review's silence then proves nothing.
+  2. **Adds its own unaddressed findings**. One already in the backlog is
+     refreshed, a resolved one reopens, and a dismissed one stays dismissed.
+  3. **Catches up on later merges**: a merge found late (a missed webhook) is
+     checked against merges into the same branch that happened after it but
+     were applied first, so a fix that already shipped resolves its items.
+- **Only merged work resolves anything**: a fix on a change still under review
+  does not count until it merges.
+- **Line numbers** are those recorded when the item shipped, so later edits
+  above it can shift them. A wrong resolution can be undone with **Reopen**.
+- **Dismiss** takes an item out of the backlog with an optional note; it stays
+  dismissed if the problem ships again, until it is reopened, including after
+  [retention](#retention) has scrubbed it.
+
+Filter by state, origin (open at merge or fix later), severity, category, type,
+age and repository.
 
 ## Automatic reviews
 
@@ -1617,6 +1661,10 @@ that limit both.
 - **Findings** (`findings`): one row per finding per change, with its title,
   file and line, severity, model, the change's title and author, and its state,
   including ignore reasons and notes.
+- **Backlog** (`backlog_items`, `change_states`): findings that shipped
+  unaddressed, with the same fields as a finding row plus where they merged
+  and how they were resolved or why they were dismissed, and whether each
+  change was last seen open, closed or merged.
 - **Posted comments** (`posted_findings`): which inline comments were posted
   where, so a later run does not repost them.
 - **Thread replies** (`thread_replies`): replies and `/sentryward` commands left
@@ -1684,7 +1732,18 @@ Once an hour the worker:
   lose their ignore state mid-review; if a purged change becomes active again it
   is reviewed afresh (the forge's own markers still stop inline comments from
   being posted twice), and benchmark and calibration figures no longer count
-  its findings.
+  its findings. Its backlog items stay: they belong to the repository. A
+  change with findings the [backlog](#backlog) could still take waits until
+  the worker has asked the forge whether it merged (a failed check counts),
+  unless its repository is turned off or its access is gone, and a change
+  recorded as merged waits until the merge is applied. Whether a change merged
+  is kept, so a purged merge is never applied twice.
+- **Prunes the backlog**: items resolved longer ago than the period are
+  deleted, and so are open items whose merge and last sighting (in that change
+  or a later merged one) are both older than the period. Items dismissed
+  longer ago than the period are scrubbed rather than deleted: their title,
+  file, author and notes are cleared and they leave the Backlog page, but the
+  dismissal still holds if the same problem ships again.
 - **Deletes audit log entries** older than the instance's **audit log
   retention** (empty keeps them forever). Only instance admins set this, so a
   workspace cannot erase its own trail.
@@ -1924,6 +1983,18 @@ rate limited (20 requests per 15 minutes per IP).
   group), `model` or `category`. Tool and rule findings carry no self-reported
   confidence and are left out. The response sets `selfReported: true`:
   confidence is never a calibrated probability by itself.
+
+</details>
+
+<details>
+<summary>Backlog</summary>
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET    | `/api/backlog?repoId=&state=&origin=&severity=&category=&kind=&olderThanDays=&q=&sort=&dir=&page=&limit=` | Backlog items, newest merge first by default. `q` matches title, file, author, repository path, and `#12`/`!12` the source or resolving change |
+| GET    | `/api/backlog/stats?repoId=` | Open items: `{ open, bySeverity, byAge }`, with age buckets `week`, `month`, `quarter` and `older` by when the finding was first raised |
+| GET    | `/api/backlog/:id` | One item, plus `sourceReviewId` (the latest stored review of the change it shipped in, or `null`) |
+| PATCH  | `/api/backlog/:id` | `{ "state": "dismissed", "note"? }` or `{ "state": "open" }`. `resolved` is only set by a merge |
 
 </details>
 

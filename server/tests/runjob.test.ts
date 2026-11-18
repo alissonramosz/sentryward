@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { prisma } from "../src/lib/prisma.ts";
+import { applyPendingMerges } from "../src/services/backlog.ts";
 import type { IssueContext, ReviewResult, ToolAnnotation } from "../src/review/core/models.ts";
 import { ForgeCache } from "../src/review/forge/cache.ts";
 import { ForgeError } from "../src/review/forge/http.ts";
@@ -878,6 +879,36 @@ describe("runJob when the change closes", () => {
 
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe("completed");
     expect(published.inline).toHaveLength(1);
+  });
+
+  it("records a merge seen mid-review once the review's own findings are synced, with abort on close off", async () => {
+    await prisma.repository.update({ where: { id: repositoryId }, data: { settings: { triggers: { abortOnClose: false } } } });
+    const job = await claimedJob();
+    const { runDeps } = deps({}, answers, undefined, { states: ["open", "merged"] });
+
+    await runJob(job, runDeps);
+
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe("completed");
+    expect(await prisma.changeState.findMany({ select: { number: true, state: true } })).toEqual([
+      { number: job.number, state: "merged" },
+    ]);
+    // Applied by the worker once the job is no longer running, from this run's
+    // findings, which only exist once the run synced them.
+    expect((await applyPendingMerges()).applied).toBe(1);
+    const promoted = await prisma.backlogItem.findMany({ select: { fingerprint: true } });
+    const synced = await prisma.finding.findMany({ select: { fingerprint: true } });
+    expect(synced.length).toBeGreaterThan(0);
+    expect(promoted).toEqual(synced);
+  });
+
+  it("records a merge that cancels the review", async () => {
+    const job = await claimedJob();
+    const { runDeps } = deps({}, answers, undefined, { states: ["open", "merged"] });
+
+    await runJob(job, runDeps);
+
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe("cancelled");
+    expect(await prisma.changeState.findMany({ select: { state: true } })).toEqual([{ state: "merged" }]);
   });
 
   it("keeps a job cancelled from elsewhere cancelled", async () => {

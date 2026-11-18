@@ -49,6 +49,7 @@ describe("DashboardLayout", () => {
     const labels = [...document.querySelectorAll("[data-sidebar=group-label]")].map((label) => label.textContent)
     // Administration is for instance admins only.
     expect(labels).toEqual(["Activity", "Insights", "Workspace"])
+    expect(screen.getByRole("link", { name: "Backlog" })).toHaveAttribute("href", "/backlog")
     const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" })
     expect(within(breadcrumb).getByText("Insights")).toBeInTheDocument()
     expect(within(breadcrumb).getByText("Usage")).toHaveAttribute("aria-current", "page")

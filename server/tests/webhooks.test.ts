@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { app } from "../src/app.ts";
 import { encrypt } from "../src/lib/crypto.ts";
 import { prisma } from "../src/lib/prisma.ts";
+import { applyPendingMerges } from "../src/services/backlog.ts";
 import { parseReviewCommand } from "../src/lib/webhook.ts";
 import { MAX_FOCUS } from "../src/review/core/models.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
@@ -100,6 +101,24 @@ const prEvent = (action: string, sha = "sha1") => ({
   pull_request: { number: 42, head: { sha } },
   sender: { login: "alice" },
 });
+
+// An unaddressed finding on change `number`, for the backlog's merge step.
+function openFinding(repositoryId: string, number: number, fingerprint = "fp1") {
+  return prisma.finding.create({
+    data: {
+      repositoryId,
+      number,
+      fingerprint,
+      title: "Unchecked input",
+      file: "src/app.ts",
+      startLine: 3,
+      severity: "major",
+      category: "bug",
+      kind: "issue",
+      changeTitle: "Add input",
+    },
+  });
+}
 
 beforeEach(async () => {
   await prisma.workspace.deleteMany();
@@ -248,6 +267,43 @@ describe("POST /api/webhooks/github", () => {
     await sendGithub("pull_request", prEvent("opened"));
     expect((await sendGithub("pull_request", prEvent("closed"))).body).toEqual({ outcome: "closed", cancelled: 0 });
     expect((await prisma.reviewJob.findFirst())!.status).toBe("queued");
+  });
+
+  it("moves a merged PR's open findings into the backlog, and a closed one's nowhere", async () => {
+    const repo = await githubRepo();
+    await openFinding(repo.id, 42);
+    await openFinding(repo.id, 43, "fp2");
+    const closed = (number: number, merged: boolean) => ({
+      ...prEvent("closed"),
+      pull_request: {
+        number,
+        head: { sha: "sha1" },
+        base: { ref: "develop" },
+        merged,
+        merged_at: merged ? "2026-11-18T09:00:00Z" : null,
+        closed_at: "2026-11-18T09:00:00Z",
+      },
+    });
+
+    expect((await sendGithub("pull_request", closed(43, false))).body.outcome).toBe("closed");
+    expect(await prisma.backlogItem.count()).toBe(0);
+    expect((await sendGithub("pull_request", closed(42, true))).body.outcome).toBe("closed");
+    // A redelivery adds nothing.
+    await sendGithub("pull_request", closed(42, true));
+    // The webhook only records the merge; the worker applies it.
+    expect(await prisma.backlogItem.count()).toBe(0);
+    expect((await applyPendingMerges()).applied).toBe(1);
+    expect(await prisma.backlogItem.findMany({ select: { fingerprint: true, baseBranch: true, mergedAt: true } })).toEqual([
+      { fingerprint: "fp1", baseBranch: "develop", mergedAt: new Date("2026-11-18T09:00:00Z") },
+    ]);
+    expect(await prisma.changeState.findMany({ orderBy: { number: "asc" }, select: { number: true, state: true } })).toEqual([
+      { number: 42, state: "merged" },
+      { number: 43, state: "closed" },
+    ]);
+
+    // Reopening the closed one says it is open again.
+    await sendGithub("pull_request", { ...prEvent("reopened"), pull_request: { number: 43, head: { sha: "sha2" } } });
+    expect((await prisma.changeState.findFirst({ where: { number: 43 } }))!.state).toBe("open");
   });
 
   it("reviews a shared installation's PR once, for the earliest enabled repository", async () => {
@@ -535,6 +591,24 @@ describe("POST /api/webhooks/gitlab/:repoId", () => {
     expect((await sendGitlab(repo.id, "Merge Request Hook", mrEvent("merge"))).body).toEqual({ outcome: "closed", cancelled: 1 });
     expect((await sendGitlab(repo.id, "Merge Request Hook", mrEvent("close"))).body).toEqual({ outcome: "closed", cancelled: 0 });
     expect((await prisma.reviewJob.findFirst())!.status).toBe("cancelled");
+  });
+
+  it("moves a merged MR's open findings into the backlog, and a closed one's nowhere", async () => {
+    const repo = await gitlabRepo();
+    await openFinding(repo.id, 7);
+    await openFinding(repo.id, 8, "fp2");
+
+    await sendGitlab(repo.id, "Merge Request Hook", mrEvent("close", { iid: 8 }));
+    expect(await prisma.backlogItem.count()).toBe(0);
+    await sendGitlab(repo.id, "Merge Request Hook", mrEvent("merge", { target_branch: "main" }));
+    expect(await prisma.backlogItem.count()).toBe(0);
+    expect((await applyPendingMerges()).applied).toBe(1);
+    expect(await prisma.backlogItem.findMany({ select: { fingerprint: true, sourceNumber: true, baseBranch: true } })).toEqual([
+      { fingerprint: "fp1", sourceNumber: 7, baseBranch: "main" },
+    ]);
+
+    await sendGitlab(repo.id, "Merge Request Hook", mrEvent("reopen", { iid: 8 }));
+    expect((await prisma.changeState.findFirst({ where: { number: 8 } }))!.state).toBe("open");
   });
 
   it("queues nothing while the forge refuses the connection's credentials, and resumes once cleared", async () => {

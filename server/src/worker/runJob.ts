@@ -33,6 +33,7 @@ import { publishes, publishReview, resolvesThreads } from "../review/publish/pub
 import { pendingStatus } from "../review/publish/status.ts";
 import { summarize } from "../review/render/json.ts";
 import { cancelledMarkdown, progressMarkdown } from "../review/render/progress.ts";
+import { recordChangeStateQuietly } from "../services/backlog.ts";
 import { adapterForConnection, type Forge } from "../services/forge.ts";
 import {
   CREDENTIALS_REJECTED_REASON,
@@ -309,7 +310,14 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   // A run that lost its claim (failed on timeout, recovered and claimed again,
   // or overtaken by a newer job for the change) stops too, so it never
   // publishes for a job it no longer owns.
+  // The change being closed or merged is noticed whatever abortOnClose says,
+  // for the backlog (the webhook may have missed it): with abortOnClose off
+  // that costs one forge read per check until a close is seen, and the review
+  // still finishes. It is recorded once the run is done (recordSeenClose); the
+  // worker applies the merge only when no review of the change is queued or
+  // running, so this run's findings are synced before they are promoted.
   let cancelledBy: "manual" | "closed" | "disabled" | "lost" | undefined;
+  let seenClosed: "closed" | "merged" | undefined;
   const ownsClaim = async () => {
     const claim = await claimState(job.id, job.attempts);
     if (claim === "owned") return true;
@@ -318,12 +326,19 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   };
   const watch = watchForClose(async () => {
     if (!(await ownsClaim())) return true;
+    if (!seenClosed) {
+      const { state } = await forge.getChangeHead(repo.fullPath, job.number);
+      if (state !== "closed" && state !== "merged") return false;
+      seenClosed = state;
+    }
     if (!config.triggers.abortOnClose) return false;
-    const { state } = await forge.getChangeHead(repo.fullPath, job.number);
-    if (state !== "closed" && state !== "merged") return false;
     cancelledBy = "closed";
     return true;
   }, deps.closeCheckIntervalMs ?? CLOSE_CHECK_INTERVAL_MS);
+  const recordSeenClose = async () => {
+    if (!seenClosed) return;
+    await recordChangeStateQuietly({ repositoryId: repo.id, number: job.number, state: seenClosed, baseBranch: changeSet.baseRef });
+  };
   // Whether the summary comment (progress note or review) is on the change, so
   // a cancel knows to replace it.
   let summaryPosted = false;
@@ -363,6 +378,8 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
       headSha: ref.headSha,
       baseSha: ref.baseSha,
     });
+    // A cancelled run syncs nothing, so the change's earlier review speaks for it.
+    await recordSeenClose();
   };
   if (await watch.closedNow()) {
     await cancel(false);
@@ -597,5 +614,8 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     }).catch(
       (err: unknown) => console.error(`[worker] could not sync findings for job ${job.id}`, err),
     );
+    // After the sync. Applying waits for this job to leave "running", so the
+    // merge promotes this run's findings and resolves with this run's result.
+    await recordSeenClose();
   }
 }

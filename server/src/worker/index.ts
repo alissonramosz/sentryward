@@ -8,6 +8,8 @@ import { claimNext, recoverStale, requeueInterrupted } from "./queue.ts";
 import { claimNextReply, recoverStaleReplies } from "./replyQueue.ts";
 import { executeReply } from "./executeReply.ts";
 import { runRetention } from "./retention.ts";
+import { sweepClosedChanges } from "./backlogSweep.ts";
+import { applyPendingMerges } from "../services/backlog.ts";
 
 let stopping = false;
 const running = new Set<Promise<void>>();
@@ -24,6 +26,13 @@ const DELIVERY_CONCURRENCY = 10;
 // start runs it.
 const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
 let lastPruneAt = 0;
+// Each pass asks the forge about a small batch, so it runs more often than retention.
+const BACKLOG_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+let lastSweepAt = 0;
+// Merges recorded by webhooks, reviews and the sweep are applied here, so a
+// merged change reaches the backlog within about this long of its last review.
+const BACKLOG_APPLY_INTERVAL_MS = 30 * 1000;
+let lastApplyAt = 0;
 
 // Claims are awaited one at a time; the work itself runs in the background up
 // to WORKER_CONCURRENCY jobs. Replies to inline threads share the slots and
@@ -90,12 +99,37 @@ async function prune(): Promise<void> {
   // retrying every poll.
   lastPruneAt = Date.now();
   const r = await runRetention();
-  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries) {
+  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries || r.backlogItems || r.backlogScrubbed) {
     console.log(
       `[worker] retention: deleted ${r.deleted} job(s), expired ${r.trimmed} result(s), ` +
         `purged ${r.changes} change(s) (${r.findings} finding(s), ${r.replies} reply(ies)), ` +
-        `${r.auditRows} audit row(s), ${r.deliveries} notification delivery(ies)`,
+        `${r.auditRows} audit row(s), ${r.deliveries} notification delivery(ies), ${r.backlogItems} backlog item(s), ` +
+        `scrubbed ${r.backlogScrubbed} dismissed backlog item(s)`,
     );
+  }
+}
+
+// Applies recorded merges to the backlog (backlog.ts). Like prune, the time is
+// set first so a failing pass waits for the next interval.
+async function applyBacklogMerges(): Promise<void> {
+  if (Date.now() - lastApplyAt < BACKLOG_APPLY_INTERVAL_MS) return;
+  lastApplyAt = Date.now();
+  const r = await applyPendingMerges();
+  if (r.applied || r.failed) {
+    console.log(
+      `[worker] backlog: applied ${r.applied} merge(s) (${r.promoted} item(s) added, ${r.resolved} resolved), ${r.failed} failed`,
+    );
+  }
+}
+
+// Finds merges the close webhook missed (backlogSweep.ts). Like prune, the
+// time is set first so a failing sweep waits for the next interval.
+async function sweepBacklog(): Promise<void> {
+  if (Date.now() - lastSweepAt < BACKLOG_SWEEP_INTERVAL_MS) return;
+  lastSweepAt = Date.now();
+  const r = await sweepClosedChanges();
+  if (r.merged || r.failed) {
+    console.log(`[worker] backlog sweep: checked ${r.checked} change(s), ${r.merged} merged, ${r.failed} failed`);
   }
 }
 
@@ -159,6 +193,18 @@ async function loop(): Promise<void> {
       await dispatchDeliveries();
     } catch (err) {
       console.error("[worker] notification deliveries failed", err);
+    }
+    // Apply, then sweep, then prune: a merge must reach the backlog while its
+    // findings exist (retention also waits for a recorded merge to be applied).
+    try {
+      await applyBacklogMerges();
+    } catch (err) {
+      console.error("[worker] applying backlog merges failed", err);
+    }
+    try {
+      await sweepBacklog();
+    } catch (err) {
+      console.error("[worker] backlog sweep failed", err);
     }
     try {
       await prune();

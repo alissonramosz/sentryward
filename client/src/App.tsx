@@ -11,6 +11,7 @@ import { DashboardLayout } from "@/layouts/DashboardLayout"
 // stay static so they render (and redirect) without waiting on a chunk.
 const AdminSettingsPage = lazy(() => import("@/pages/admin/AdminSettingsPage").then((m) => ({ default: m.AdminSettingsPage })))
 const AdminUsersPage = lazy(() => import("@/pages/admin/AdminUsersPage").then((m) => ({ default: m.AdminUsersPage })))
+const BacklogPage = lazy(() => import("@/pages/backlog/BacklogPage").then((m) => ({ default: m.BacklogPage })))
 const ConfigurationPage = lazy(() => import("@/pages/config/ConfigurationPage").then((m) => ({ default: m.ConfigurationPage })))
 const FindingsPage = lazy(() => import("@/pages/findings/FindingsPage").then((m) => ({ default: m.FindingsPage })))
 const ForgotPasswordPage = lazy(() => import("@/pages/auth/ForgotPasswordPage").then((m) => ({ default: m.ForgotPasswordPage })))
@@ -61,6 +62,7 @@ export function App() {
               <Route path="/reviews" element={<ReviewsPage />} />
               <Route path="/reviews/:id" element={<ReviewDetailPage />} />
               <Route path="/findings" element={<FindingsPage />} />
+              <Route path="/backlog" element={<BacklogPage />} />
               <Route path="/usage" element={<UsagePage />} />
               <Route path="/benchmarks" element={<BenchmarksPage />} />
               <Route path="/repositories" element={<RepositoriesPage />} />
