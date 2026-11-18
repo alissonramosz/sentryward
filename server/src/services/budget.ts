@@ -121,9 +121,14 @@ export function budgetPayload(
 
 // Models the workspace's recent reviews called that no price covers. Their
 // calls cost nothing in the spend, so a budget cannot be switched on while any
-// are left.
-export async function unpricedModels(workspaceId: string, now = new Date()): Promise<string[]> {
-  const { models } = await listModelPrices(workspaceId, now);
+// are left. saveBudget passes its transaction, so the check reads prices under
+// the workspace lock that deleteModelPrice also takes.
+export async function unpricedModels(
+  workspaceId: string,
+  now = new Date(),
+  db: Prisma.TransactionClient = prisma,
+): Promise<string[]> {
+  const { models } = await listModelPrices(workspaceId, now, db);
   return models.filter((model) => model.price === null).map((model) => model.model);
 }
 

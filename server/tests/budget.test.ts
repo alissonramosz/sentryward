@@ -632,6 +632,20 @@ describe("/api/settings/budget", () => {
     expect(changed.body).toMatchObject({ monthlyBudgetUsd: 20, unpricedCalls: 1, unpricedModels: ["openai/my-proxy"] });
   });
 
+  it("holds a price delete while a budget save has the workspace locked", async () => {
+    const price = await prisma.modelPrice.create({ data: { workspaceId, model: "openai/my-proxy", input: 1, output: 2 } });
+    let deleted!: Promise<request.Response>;
+    await prisma.$transaction(async (tx) => {
+      // The lock saveBudget holds while it checks prices and saves.
+      await tx.$queryRaw`SELECT id FROM workspaces WHERE id = ${workspaceId}::uuid FOR NO KEY UPDATE`;
+      deleted = request(app).delete(`/api/settings/model-prices/${price.id}`).set("Cookie", cookie).then((res) => res);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await prisma.modelPrice.findUnique({ where: { id: price.id } })).not.toBeNull();
+    });
+    expect((await deleted).status).toBe(204);
+    expect(await prisma.modelPrice.findUnique({ where: { id: price.id } })).toBeNull();
+  });
+
   it("lets only admins change the budget", async () => {
     const member = await createUser("member@example.com");
     await addMember(workspaceId, member.user.id, "member");

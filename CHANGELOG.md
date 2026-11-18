@@ -36,7 +36,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   only while still an owner or admin. Webhooks get a `budget` body with the month,
   threshold, spend, budget and unpriced calls; Slack, Google Chat, Discord,
   Teams and email get a short message with a **View usage** link. A budget can
-  only be switched on once every model used in the last 90 days has a price.
+  only be switched on once every model used in the last 90 days has a price;
+  that check and deleting a model price take the same workspace row lock, so a
+  price deleted while a budget is being switched on cannot slip past it.
   The budget card shows this month's spend against the budget, the alerts sent,
   the models still unpriced and a warning when no target listens. The Usage
   page shows the same meter when a budget is set. New endpoints:

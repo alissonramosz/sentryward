@@ -1,3 +1,4 @@
+import type { Prisma } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
 import { priceFor, type ModelPrice, type PriceOverrides } from "../review/core/pricing/pricing.ts";
 
@@ -25,8 +26,12 @@ export async function priceOverridesFor(workspaceId: string): Promise<PriceOverr
 // Read in Postgres so a check reads one short list, not every review's
 // digest: the budget card asks on each view. Keep it in step with
 // digestModels (usage.ts): a model counts once it used tokens (usedTokens).
-export async function recentModels(workspaceId: string, now = new Date()): Promise<string[]> {
-  const rows = await prisma.$queryRaw<{ model: string }[]>`
+export async function recentModels(
+  workspaceId: string,
+  now = new Date(),
+  db: Prisma.TransactionClient = prisma,
+): Promise<string[]> {
+  const rows = await db.$queryRaw<{ model: string }[]>`
     SELECT DISTINCT u.key AS model
     FROM review_jobs j
     JOIN repositories r ON r.id = j.repository_id
@@ -49,10 +54,10 @@ export async function recentModels(workspaceId: string, now = new Date()): Promi
 // price each would get without one and the one reviews get now (null:
 // unknown), so an admin can see which models still need a price. The current
 // price goes through priceFor, so a price saved under a shorter id counts.
-export async function listModelPrices(workspaceId: string, now = new Date()) {
+export async function listModelPrices(workspaceId: string, now = new Date(), db: Prisma.TransactionClient = prisma) {
   const [prices, used] = await Promise.all([
-    prisma.modelPrice.findMany({ where: { workspaceId }, select: PRICE_FIELDS, orderBy: { model: "asc" } }),
-    recentModels(workspaceId, now),
+    db.modelPrice.findMany({ where: { workspaceId }, select: PRICE_FIELDS, orderBy: { model: "asc" } }),
+    recentModels(workspaceId, now, db),
   ]);
   const overrides: PriceOverrides = Object.fromEntries(prices.map((row) => [row.model, asPrice(row)]));
   return {
