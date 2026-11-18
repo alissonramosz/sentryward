@@ -141,7 +141,20 @@ export async function recordChangeState(input: ChangeStateInput): Promise<boolea
     await lockChange(tx, "backlog", repositoryId, number);
     const existing = await tx.changeState.findUnique({ where: { repositoryId_number: { repositoryId, number } } });
     if (existing?.state === "merged") {
-      await tx.changeState.update({ where: { id: existing.id }, data: { checkedAt: now } });
+      // Still merged, and recorded once; but a later observation can say more.
+      // A closedAt passed in is the forge's own merge time (the close watch and
+      // the GitLab webhook pass none and fall back to the time we noticed), so
+      // it replaces whatever was stored. Every forge source reports the same
+      // time for one merge, so repeated deliveries stay idempotent. The branch
+      // is only filled in: applyMerge writes the one it used.
+      await tx.changeState.update({
+        where: { id: existing.id },
+        data: {
+          checkedAt: now,
+          ...(input.closedAt ? { closedAt: input.closedAt } : {}),
+          ...(existing.baseBranch === null && input.baseBranch ? { baseBranch: input.baseBranch } : {}),
+        },
+      });
       return false;
     }
     // Open is the default for a change with no row: only one recorded as

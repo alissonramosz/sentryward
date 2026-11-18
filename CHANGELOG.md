@@ -31,7 +31,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   is known). The worker applies recorded merges, oldest first, once no review
   of the change is queued or running, so webhooks stay fast and a review still
   running at merge time has its findings counted; a merge applied late is
-  replayed against later merges into the same branch. A new **Backlog** page lists items with filters for state,
+  replayed against later merges into the same branch. A merge first seen
+  without a merge time (by a running review, or a GitLab webhook) takes the
+  forge's time, and a missing target branch, from a later webhook or sweep. A new **Backlog** page lists items with filters for state,
   origin, severity, category, type, age and repository, a stats strip (open
   items by severity and age, for the selected repository), and dismiss (with an optional note) and reopen
   actions, backed by `GET /api/backlog`, `GET /api/backlog/stats`,

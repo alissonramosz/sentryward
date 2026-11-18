@@ -215,6 +215,26 @@ describe("recording and applying a merge", () => {
     expect((await items()).map((item) => item.fingerprint)).toEqual(["fp-open"]);
   });
 
+  it("takes the forge's merge time and branch from a later record of the same merge", async () => {
+    await finding(7, "fp-open");
+    const mergedAt = new Date("2026-11-01T10:00:00Z");
+    const state = () => prisma.changeState.findFirstOrThrow({ select: { closedAt: true, baseBranch: true } });
+    // The close watch notices first: no merge time, and here no branch either.
+    expect(await recordChangeState({ repositoryId: repoId, number: 7, state: "merged", baseBranch: null })).toBe(true);
+    expect((await state()).closedAt).not.toEqual(mergedAt);
+
+    // The webhook follows with the forge's time; the merge is still recorded once.
+    expect(await record(7, mergedAt)).toBe(false);
+    expect(await state()).toEqual({ closedAt: mergedAt, baseBranch: "main" });
+
+    // A record without a time, or naming another branch, leaves both alone.
+    expect(await recordChangeState({ repositoryId: repoId, number: 7, state: "merged", baseBranch: "other" })).toBe(false);
+    expect(await state()).toEqual({ closedAt: mergedAt, baseBranch: "main" });
+
+    await applyMerge(repoId, 7);
+    expect((await items()).map((item) => item.mergedAt)).toEqual([mergedAt]);
+  });
+
   it("resolves earlier items from the merged change's review, but never its own", async () => {
     await finding(7, "fp-old");
     await merge(7);
