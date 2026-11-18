@@ -10,6 +10,7 @@ import { executeReply } from "./executeReply.ts";
 import { runRetention } from "./retention.ts";
 import { sweepClosedChanges } from "./backlogSweep.ts";
 import { applyPendingMerges } from "../services/backlog.ts";
+import { runBudgetAlertPage, sendAdminEmails } from "./budgetAlerts.ts";
 
 let stopping = false;
 const running = new Set<Promise<void>>();
@@ -33,6 +34,13 @@ let lastSweepAt = 0;
 // merged change reaches the backlog within about this long of its last review.
 const BACKLOG_APPLY_INTERVAL_MS = 30 * 1000;
 let lastApplyAt = 0;
+// A month's spend moves with each finished review; a few minutes' delay on a
+// budget alert is fine, and each scan reads every budgeted workspace's month.
+// A scan starts this long after the previous one started and runs one page of
+// workspaces per poll; budgetCursor is where it left off (null between scans).
+const BUDGET_INTERVAL_MS = 5 * 60 * 1000;
+let lastBudgetAt = 0;
+let budgetCursor: string | null = null;
 
 // Claims are awaited one at a time; the work itself runs in the background up
 // to WORKER_CONCURRENCY jobs. Replies to inline threads share the slots and
@@ -99,14 +107,30 @@ async function prune(): Promise<void> {
   // retrying every poll.
   lastPruneAt = Date.now();
   const r = await runRetention();
-  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries || r.backlogItems || r.backlogScrubbed) {
+  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries || r.backlogItems || r.backlogScrubbed || r.budgetAlerts) {
     console.log(
       `[worker] retention: deleted ${r.deleted} job(s), expired ${r.trimmed} result(s), ` +
         `purged ${r.changes} change(s) (${r.findings} finding(s), ${r.replies} reply(ies)), ` +
         `${r.auditRows} audit row(s), ${r.deliveries} notification delivery(ies), ${r.backlogItems} backlog item(s), ` +
-        `scrubbed ${r.backlogScrubbed} dismissed backlog item(s)`,
+        `scrubbed ${r.backlogScrubbed} dismissed backlog item(s), ${r.budgetAlerts} budget alert(s)`,
     );
   }
+}
+
+// Announces newly crossed budget thresholds (budgetAlerts.ts), one page of
+// workspaces per poll so a large scan never stalls claims and deliveries. Like
+// prune, the time is set first so a failing scan waits for the next interval;
+// the cursor is dropped first for the same reason, a failing page ending the scan.
+async function checkBudgets(): Promise<void> {
+  if (budgetCursor === null) {
+    if (Date.now() - lastBudgetAt < BUDGET_INTERVAL_MS) return;
+    lastBudgetAt = Date.now();
+  }
+  const after = budgetCursor;
+  budgetCursor = null;
+  const page = await runBudgetAlertPage(new Date(), after);
+  budgetCursor = page.next;
+  if (page.announced) console.log(`[worker] queued ${page.announced} budget alert(s)`);
 }
 
 // Applies recorded merges to the backlog (backlog.ts). Like prune, the time is
@@ -182,12 +206,26 @@ async function loop(): Promise<void> {
     } catch (err) {
       console.error("[worker] poll failed", err);
     }
-    // Before dispatch, so a digest queued here goes out in the same pass.
+    // Before dispatch, so a digest or budget alert queued here goes out in
+    // the same pass.
     try {
       const digests = await runDueDigests();
       if (digests > 0) console.log(`[worker] queued ${digests} notification digest(s)`);
     } catch (err) {
       console.error("[worker] notification digests failed", err);
+    }
+    try {
+      await checkBudgets();
+    } catch (err) {
+      console.error("[worker] budget alerts failed", err);
+    }
+    // Every poll, like dispatch, and one batch at a time: an alert announced
+    // above is mailed now, and failed sends wait out their stale lock.
+    try {
+      await sendAdminEmails(new Date());
+    } catch (err) {
+      // What was claimed stays locked until the lock goes stale, then is retried.
+      console.error("[notify] budget emails failed", err);
     }
     try {
       await dispatchDeliveries();

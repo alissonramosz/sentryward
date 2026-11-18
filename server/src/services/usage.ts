@@ -29,7 +29,7 @@ export function periodStart(period: UsagePeriod, now: Date): Date | null {
 }
 
 // Buckets are UTC so every viewer and test sees the same boundaries.
-function floorTo(date: Date, unit: Unit): Date {
+export function floorTo(date: Date, unit: Unit): Date {
   const d = new Date(date);
   if (unit === "month") d.setUTCDate(1);
   if (unit !== "hour") d.setUTCHours(0);

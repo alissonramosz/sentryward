@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { BUDGET_KEY } from "@/features/budget/api"
 import { api } from "@/lib/api"
 
 // USD per million tokens. Cache and reasoning rates absent fall back to the
@@ -62,8 +63,12 @@ export function useSaveModelPrice() {
       api<ModelPrices>("/settings/model-prices", { method: "PUT", body: JSON.stringify(input) }),
     onSuccess: (data) => {
       queryClient.setQueryData(KEY, data)
-      // The list is replaced in place, so lookups need their own refresh.
-      return queryClient.invalidateQueries({ queryKey: [...KEY, "lookup"] })
+      // The list is replaced in place, so lookups need their own refresh, and
+      // the budget card lists the models still unpriced.
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: [...KEY, "lookup"] }),
+        queryClient.invalidateQueries({ queryKey: BUDGET_KEY }),
+      ])
     },
   })
 }
@@ -72,6 +77,10 @@ export function useDeleteModelPrice() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => api<void>(`/settings/model-prices/${id}`, { method: "DELETE" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: KEY }),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: KEY }),
+        queryClient.invalidateQueries({ queryKey: BUDGET_KEY }),
+      ]),
   })
 }

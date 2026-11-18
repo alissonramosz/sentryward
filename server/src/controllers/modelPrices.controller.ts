@@ -34,9 +34,17 @@ export async function saveModelPrice(req: Request, res: Response) {
   res.json(await listModelPrices(workspaceId));
 }
 
+// Takes the workspace row lock saveBudget checks prices under, so a delete
+// cannot land between that check and the budget being switched on. Saving a
+// price needs no lock: a new price can only make the check pass.
 export async function deleteModelPrice(req: Request, res: Response) {
   const { id } = modelPriceIdParamSchema.parse(req.params);
-  const { count } = await prisma.modelPrice.deleteMany({ where: { id, workspaceId: req.workspaceId! } });
+  const workspaceId = req.workspaceId!;
+  const count = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM workspaces WHERE id = ${workspaceId}::uuid FOR NO KEY UPDATE`;
+    const { count } = await tx.modelPrice.deleteMany({ where: { id, workspaceId } });
+    return count;
+  });
   if (!count) throw new HttpError(404, "Price not found");
   res.status(204).end();
 }

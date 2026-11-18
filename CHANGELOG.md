@@ -10,6 +10,49 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Monthly spend alerts. Workspace admins can set a monthly budget in USD
+  (`workspaces.monthly_budget_usd`) under **Prices and budget** on the LLM
+  Connections page (the tab was **Model prices**). It only notifies: reviews
+  never stop over it. The worker checks every 5 minutes (50 workspaces per
+  poll, 4 at a time, so a large scan never holds up reviews or notification
+  deliveries) and alerts when the
+  UTC month's estimated review spend (the same figures as the Usage page)
+  reaches 50, 75, 90 and 100% of the budget, and when it passes 110% (over
+  budget), each at most once a month (`budget_alerts`, a new table, records
+  the alerts sent). Thresholds crossed together send one alert, for the
+  highest; changing the budget re-arms the month's thresholds it no longer
+  reaches, so raising it mid-month does not silence the rest. Alerts go
+  to workspace targets with the new **Budget** event (`budget` in
+  `notification_event`; personal targets don't offer it), at once whatever
+  the target's scope or digest schedule, through the usual outbox, and by email
+  to owners and admins when mail is configured (even when an email target
+  with the event also reaches them, since that target can be paused or fail). The admin email is queued in the same
+  transaction as the alert record (`admin_user_ids`, `admin_email_payload`,
+  `admin_email_attempts` and `admin_email_locked_at` on `budget_alerts`;
+  `admin_user_ids` is `NOT NULL`, since the email claim never matches a NULL
+  recipient list), so a
+  worker restart or SMTP failure cannot lose it: anyone whose email failed is
+  retried 5 minutes later, up to 5 attempts, until the month ends, and
+  only while still an owner or admin. Webhooks get a `budget` body with the month,
+  threshold, spend, budget and unpriced calls; Slack, Google Chat, Discord,
+  Teams and email get a short message with a **View usage** link. A budget can
+  only be switched on once every model used in the last 90 days has a price;
+  that check and deleting a model price take the same workspace row lock, so a
+  price deleted while a budget is being switched on cannot slip past it.
+  The budget card shows this month's spend against the budget, the alerts sent,
+  the models still unpriced and a warning when no target listens. The Usage
+  page shows the same meter when a budget is set. New endpoints:
+  `GET /api/settings/budget` and `PUT /api/settings/budget` (admins).
+  Retention deletes alert records after 400 days. The month's spend is summed
+  in the database, so a check reads one row however many reviews ran, and
+  admin emails are sent 10 per worker poll, so a pile of them never holds up
+  reviews or deliveries. The check's lock on the workspace row no longer
+  blocks (or skips the check because of) inserts that reference the
+  workspace, such as a running review's request logs. A target that listens
+  only for budget alerts is not paused when its repositories are deleted,
+  since repository scope does not apply to it. The models used in the last 90
+  days (for the budget card and the Prices tab) are listed in the database
+  rather than by loading every recent review's summary.
 - A backlog of findings that shipped. When a pull or merge request merges,
   its findings that were still open, or ignored as "fix later", become
   repository-level backlog items (`backlog_items`, a new table) that outlive

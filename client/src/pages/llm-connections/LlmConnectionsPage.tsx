@@ -6,11 +6,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useApiKeys, useApiKeyStatuses } from "@/features/llm-connections/api"
 import { isCheckable, summarize } from "@/features/llm-connections/health"
 import { LlmConnectionsGrid } from "@/features/llm-connections/LlmConnectionsGrid"
+import { BudgetCard } from "@/features/budget/BudgetCard"
 import { ModelPricesCard } from "@/features/model-prices/ModelPricesCard"
 
 const TAB_ITEMS = [
   { value: "connections", label: "Connections", icon: KeyRound },
-  { value: "prices", label: "Model prices", icon: CircleDollarSign },
+  { value: "prices", label: "Prices and budget", icon: CircleDollarSign },
 ] as const
 type Tab = (typeof TAB_ITEMS)[number]["value"]
 const TABS: readonly string[] = TAB_ITEMS.map((item) => item.value)
@@ -40,7 +41,7 @@ export function LlmConnectionsPage() {
     <PageShell>
       <PageHeader
         title="LLM Connections"
-        description={summary ?? "Provider credentials, custom API hosts and model prices that reviews run with."}
+        description={summary ?? "Provider credentials, custom API hosts, model prices and the monthly budget that reviews run with."}
       />
       <Tabs value={tab} onValueChange={(value) => setParams({ tab: value }, { replace: true })}>
         <TabsList>
@@ -54,7 +55,10 @@ export function LlmConnectionsPage() {
         <TabsContent value="connections">
           <LlmConnectionsGrid />
         </TabsContent>
-        <TabsContent value="prices">
+        <TabsContent value="prices" className="flex flex-col gap-4">
+          {/* Above the prices: a budget can only be switched on once every
+              model in use has one, and the card says which are missing. */}
+          <BudgetCard />
           <ModelPricesCard />
         </TabsContent>
       </Tabs>

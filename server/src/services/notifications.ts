@@ -36,7 +36,7 @@ const DELIVERY_TIMEOUT_MS = 10_000;
 const NOTIFIED_STATUSES: ReviewStatus[] = ["completed", "partial", "failed"];
 // Most specific first; a job is delivered once per target, as the first of its
 // events that target listens for (and its filters let through).
-const EVENT_ORDER: NotificationEvent[] = ["failed", "blocked", "resolved", "completed"];
+const EVENT_ORDER: ReviewEvent[] = ["failed", "blocked", "resolved", "completed"];
 // Events that are news whatever the target's filters say: a failure has no
 // findings or verdict to filter on, and a resolved review usually has fewer
 // findings, so a severity floor would hide exactly the good news.
@@ -44,8 +44,12 @@ const UNFILTERED_EVENTS: NotificationEvent[] = ["failed", "resolved"];
 
 type JobFacts = Pick<ReviewJob, "id" | "number" | "status" | "verdict" | "error" | "summary" | "headSha" | "trigger">;
 
+// The events a review can be: budget alerts are about the workspace's month,
+// not a review, and have a payload of their own (BudgetPayload).
+export type ReviewEvent = Exclude<NotificationEvent, "budget">;
+
 export interface NotificationPayload {
-  event: NotificationEvent | "test";
+  event: ReviewEvent | "test";
   // trigger and headSha are missing from rows queued before they were added.
   review: {
     id: string;
@@ -88,8 +92,26 @@ export interface DigestPayload {
   truncated: number;
 }
 
+// A budget alert: the workspace's spend this UTC month crossed `threshold`
+// percent of its budget (worker/budgetAlerts.ts). 110 is the over-budget alert.
+// Figures are the reviews' recorded costs, as on the Usage page; unpricedCalls
+// counts calls no price was known for, which the spend leaves out.
+export interface BudgetPayload {
+  event: "budget";
+  workspace: { id: string; name: string };
+  // "2026-11"
+  month: string;
+  threshold: number;
+  overBudget: boolean;
+  spendUsd: number;
+  budgetUsd: number;
+  percent: number;
+  unpricedCalls: number;
+  url: string;
+}
+
 // What a delivery row carries and deliver() sends.
-export type DeliveryPayload = NotificationPayload | DigestPayload;
+export type DeliveryPayload = NotificationPayload | DigestPayload | BudgetPayload;
 
 export const DIGEST_REVIEW_LIMIT = 200;
 // Blocked entries repeat payloads already in `reviews`, so they get a smaller
@@ -263,7 +285,7 @@ export type PreviousVerdict = Verdict | undefined;
 export function eventsFor(
   job: Pick<ReviewJob, "status" | "verdict">,
   previous: PreviousVerdict = undefined,
-): NotificationEvent[] {
+): ReviewEvent[] {
   if (job.status === "failed") return ["failed"];
   if (job.status !== "completed" && job.status !== "partial") return [];
   if (job.verdict === "blocked") return ["blocked", "completed"];
@@ -315,7 +337,7 @@ function verdictChanged(facts: JobFilterFacts): boolean {
 // The event a target hears about, or null when it listens for none of them or
 // its filters let none through. The repository filter is applied by the query.
 export function eventForTarget(
-  events: NotificationEvent[],
+  events: ReviewEvent[],
   target: TargetFilters,
   facts: JobFilterFacts = { bySeverity: {}, verdict: null, previous: undefined },
 ) {
@@ -1080,6 +1102,104 @@ function digestEmail(payload: DigestPayload): { subject: string; text: string } 
   return { subject, text: lines.join("\n") };
 }
 
+// A workspace name is a member's own text, so it is treated like forge text:
+// flattened, clipped and escaped per format. Every other word in a budget
+// alert is ours.
+const BUDGET_NAME_LIMIT = 100;
+
+const usd = (value: number) => `$${value.toFixed(2)}`;
+
+function budgetHeadline(payload: BudgetPayload): string {
+  return payload.overBudget
+    ? `Over budget: ${payload.percent}% of this month's budget spent`
+    : `${payload.threshold}% of this month's budget spent`;
+}
+
+function budgetDetail(payload: BudgetPayload): string {
+  return `${usd(payload.spendUsd)} of ${usd(payload.budgetUsd)} in ${payload.month} (UTC). Reviews keep running.`;
+}
+
+// Null when every call this month had a price.
+function budgetUnpriced(payload: BudgetPayload): string | null {
+  if (!payload.unpricedCalls) return null;
+  return `${plural(payload.unpricedCalls, "model call")} had no price and ${payload.unpricedCalls === 1 ? "is" : "are"} not counted.`;
+}
+
+function budgetWorkspace(payload: BudgetPayload): string {
+  return clipText(oneLine(payload.workspace.name), BUDGET_NAME_LIMIT);
+}
+
+const BUDGET_EMOJI = (payload: BudgetPayload) => (payload.overBudget || payload.threshold >= 100 ? "\u{1F534}" : "\u{1F7E0}");
+
+function slackBudget(payload: BudgetPayload) {
+  const headline = `${BUDGET_EMOJI(payload)} ${budgetHeadline(payload)}`;
+  const blocks: object[] = [
+    { type: "section", text: plainText(headline) },
+    { type: "section", text: plainText(`${budgetWorkspace(payload)}: ${budgetDetail(payload)}`) },
+  ];
+  const unpriced = budgetUnpriced(payload);
+  if (unpriced) blocks.push({ type: "context", elements: [plainText(unpriced)] });
+  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: slackLink(payload.url, "View usage") }] });
+  return { text: escapeSlack(headline), blocks };
+}
+
+function googleChatBudget(payload: BudgetPayload) {
+  const widgets: object[] = [
+    chatParagraph(chatText(budgetWorkspace(payload), BUDGET_NAME_LIMIT)),
+    chatParagraph(budgetDetail(payload)),
+  ];
+  const unpriced = budgetUnpriced(payload);
+  if (unpriced) widgets.push(chatParagraph(unpriced));
+  widgets.push({ buttonList: { buttons: [chatButton("View usage", payload.url)] } });
+  return {
+    fallbackText: budgetHeadline(payload),
+    cardsV2: [
+      {
+        cardId: "budget",
+        card: { header: { title: `${BUDGET_EMOJI(payload)} ${budgetHeadline(payload)}` }, sections: [{ widgets }] },
+      },
+    ],
+  };
+}
+
+function discordBudget(payload: BudgetPayload) {
+  const lines = [discordText(budgetWorkspace(payload), BUDGET_NAME_LIMIT), escapeDiscord(budgetDetail(payload))];
+  const unpriced = budgetUnpriced(payload);
+  if (unpriced) lines.push(escapeDiscord(unpriced));
+  lines.push(discordLink(payload.url, "View usage"));
+  return {
+    embeds: [
+      {
+        title: `${BUDGET_EMOJI(payload)} ${budgetHeadline(payload)}`,
+        description: lines.join("\n"),
+        color: payload.overBudget || payload.threshold >= 100 ? DISCORD_COLORS.blocked : DISCORD_COLORS.failed,
+      },
+    ],
+    allowed_mentions: DISCORD_NO_MENTIONS,
+  };
+}
+
+function teamsBudget(payload: BudgetPayload) {
+  const body: object[] = [
+    teamsHeading(`${BUDGET_EMOJI(payload)} ${budgetHeadline(payload)}`, "Medium"),
+    teamsRich(teamsText(budgetWorkspace(payload), BUDGET_NAME_LIMIT, { weight: "Bolder" })),
+    teamsLine(budgetDetail(payload)),
+  ];
+  const unpriced = budgetUnpriced(payload);
+  if (unpriced) body.push({ ...teamsLine(unpriced), isSubtle: true });
+  return teamsCard(body, [teamsOpenUrl("View usage", payload.url)]);
+}
+
+// Plain text, so the workspace name needs no escaping beyond one line.
+export function budgetEmail(payload: BudgetPayload): { subject: string; text: string } {
+  const subject = clipText(`${budgetHeadline(payload)} in ${budgetWorkspace(payload)}`, EMAIL_SUBJECT_LIMIT);
+  const lines = [subject, "", budgetDetail(payload)];
+  const unpriced = budgetUnpriced(payload);
+  if (unpriced) lines.push(unpriced, "Price those models under Model prices on the LLM Connections page.");
+  lines.push("", `Usage: ${payload.url}`, `Budget settings: ${env.CLIENT_ORIGIN}/llm-connections`, "");
+  return { subject, text: lines.join("\n") };
+}
+
 // "sha256=<hex>" over the exact body sent, as GitHub signs its webhooks.
 export function signature(secret: string, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
@@ -1309,22 +1429,42 @@ export async function deliver(
       return;
     }
     case "slack": {
-      const message = payload.event === "digest" ? slackDigest(payload) : slackMessage(payload);
+      const message =
+        payload.event === "digest"
+          ? slackDigest(payload)
+          : payload.event === "budget"
+            ? slackBudget(payload)
+            : slackMessage(payload);
       await post(targetUrl(target), JSON.stringify(message));
       return;
     }
     case "google_chat": {
-      const message = payload.event === "digest" ? googleChatDigest(payload) : googleChatMessage(payload);
+      const message =
+        payload.event === "digest"
+          ? googleChatDigest(payload)
+          : payload.event === "budget"
+            ? googleChatBudget(payload)
+            : googleChatMessage(payload);
       await post(targetUrl(target), JSON.stringify(message));
       return;
     }
     case "discord": {
-      const message = payload.event === "digest" ? discordDigest(payload) : discordMessage(payload);
+      const message =
+        payload.event === "digest"
+          ? discordDigest(payload)
+          : payload.event === "budget"
+            ? discordBudget(payload)
+            : discordMessage(payload);
       await post(targetUrl(target), JSON.stringify(message));
       return;
     }
     case "teams": {
-      const message = payload.event === "digest" ? teamsDigest(payload) : teamsMessage(payload);
+      const message =
+        payload.event === "digest"
+          ? teamsDigest(payload)
+          : payload.event === "budget"
+            ? teamsBudget(payload)
+            : teamsMessage(payload);
       await post(targetUrl(target), JSON.stringify(message));
       return;
     }
@@ -1341,7 +1481,11 @@ export async function deliver(
         throw new PermanentDeliveryError("None of this target's recipients are members of the workspace any more");
       }
       const mail: { subject: string; text: string; html?: string } =
-        payload.event === "digest" ? digestEmail(payload) : reviewEmail(payload, target.name);
+        payload.event === "digest"
+          ? digestEmail(payload)
+          : payload.event === "budget"
+            ? budgetEmail(payload)
+            : reviewEmail(payload, target.name);
       // One message each, so recipients do not see each other's addresses.
       const results = await Promise.allSettled(members.map(({ user }) => mailer.send({ to: user.email, ...mail })));
       const failed = results.filter((result) => result.status === "rejected").length;
@@ -1571,7 +1715,7 @@ export async function notifyJob(jobId: string): Promise<void> {
       if (!baseEvents.length) return;
       // Resolved depends on the previous review, which is only looked up when
       // a target can use it, so any finished review may be resolved here.
-      const possibleEvents: NotificationEvent[] = job.status === "failed" ? baseEvents : [...baseEvents, "resolved"];
+      const possibleEvents: ReviewEvent[] = job.status === "failed" ? baseEvents : [...baseEvents, "resolved"];
       // Paused targets are left out here, and pausing a target drops the rows
       // queued for it (dropPendingDeliveries), so a paused target misses this
       // job for good rather than catching up when it is resumed. A test
@@ -1718,10 +1862,13 @@ export function pauseCause(reason: string | null): PauseCause | null {
 // none would read as "all repositories", so instead it is paused (and its
 // queued deliveries dropped) with SCOPE_REASON, already paused or not, and
 // cannot be switched back on until an admin saves its repositories again (see
-// updateNotification). Call in the transaction that deletes the repositories.
+// updateNotification). A target that listens only for budget alerts is left
+// running: repository scope does not apply to them, and widening it to "all
+// repositories" changes nothing it sends. Call in the transaction that deletes
+// the repositories.
 export async function dropRepositoriesFromTargets(tx: Prisma.TransactionClient, repositoryIds: string[]) {
   if (!repositoryIds.length) return;
-  const rows = await tx.$queryRaw<{ id: string; remaining: number }[]>`
+  const rows = await tx.$queryRaw<{ id: string; remaining: number; events: string[] }[]>`
     UPDATE notification_targets
     SET repository_ids = ARRAY(
       SELECT id FROM unnest(repository_ids) AS id WHERE id <> ALL(${repositoryIds}::uuid[])
@@ -1729,10 +1876,11 @@ export async function dropRepositoriesFromTargets(tx: Prisma.TransactionClient, 
     -- A raw UPDATE skips Prisma's @updatedAt.
     updated_at = now()
     WHERE repository_ids && ${repositoryIds}::uuid[]
-    RETURNING id, cardinality(repository_ids) AS remaining
+    RETURNING id, cardinality(repository_ids) AS remaining, events::text[] AS events
   `;
   for (const row of rows) {
     if (row.remaining > 0) continue;
+    if (row.events.length > 0 && row.events.every((event) => event === "budget")) continue;
     await tx.notificationTarget.update({ where: { id: row.id }, data: { active: false, pausedReason: SCOPE_REASON } });
     await dropPendingDeliveries(tx, row.id);
   }

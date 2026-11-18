@@ -12,10 +12,10 @@ import { useAuth } from "@/features/auth/useAuth"
 import { forgeOrigin, PROVIDERS } from "@/features/forge/providers"
 import {
   errorMessage,
-  EVENT_OPTIONS,
+  REVIEW_EVENT_OPTIONS,
   usePersonalNotifications,
   useUpdatePersonalNotifications,
-  type NotificationEvent,
+  type ReviewEvent,
   type PersonalForge,
 } from "./api"
 
@@ -60,7 +60,7 @@ export function PersonalNotifications() {
   const savedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => () => clearTimeout(savedTimer.current), [])
 
-  async function save(input: { enabled: boolean; events: NotificationEvent[] }) {
+  async function save(input: { enabled: boolean; events: ReviewEvent[] }) {
     clearTimeout(savedTimer.current)
     setSaved(false)
     try {
@@ -157,7 +157,7 @@ export function PersonalNotifications() {
                 <FieldDescription>Switch on to choose events.</FieldDescription>
               )}
               <div className="grid gap-x-6 gap-y-2 sm:grid-cols-2">
-                {EVENT_OPTIONS.map((option) => {
+                {REVIEW_EVENT_OPTIONS.map((option) => {
                   const id = `personal-event-${option.value}`
                   const checked = current.events.includes(option.value)
                   // At least one event stays chosen, as the server requires.

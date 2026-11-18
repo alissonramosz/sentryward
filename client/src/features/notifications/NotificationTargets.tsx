@@ -94,7 +94,7 @@ import { FailingTargets } from "./FailingTargets"
 import { PersonalNotifications } from "./PersonalNotifications"
 
 const eventsSchema = z
-  .array(z.enum(["blocked", "failed", "resolved", "completed"]))
+  .array(z.enum(["blocked", "failed", "resolved", "completed", "budget"]))
   .min(1, "Choose at least one event")
 
 // The scope as the form holds it; toFilters turns it into what the API takes.

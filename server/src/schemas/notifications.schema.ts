@@ -2,13 +2,17 @@ import { z } from "zod";
 import { isValidTimeZone } from "../services/digestSchedule.ts";
 import { pageSchema } from "./pagination.ts";
 
-const NOTIFICATION_EVENTS = ["blocked", "failed", "resolved", "completed"] as const;
+const REVIEW_EVENTS = ["blocked", "failed", "resolved", "completed"] as const;
+// Budget alerts are about the workspace, so only workspace targets take them.
+const NOTIFICATION_EVENTS = [...REVIEW_EVENTS, "budget"] as const;
 
 const name = z.string().trim().min(1, "Name is required").max(100);
-const events = z
-  .array(z.enum(NOTIFICATION_EVENTS))
-  .min(1, "Choose at least one event")
-  .transform((list) => [...new Set(list)]);
+const eventList = <T extends readonly [string, ...string[]]>(values: T) =>
+  z
+    .array(z.enum(values))
+    .min(1, "Choose at least one event")
+    .transform((list) => [...new Set(list)]);
+const events = eventList(NOTIFICATION_EVENTS);
 const url = z.url({ protocol: /^https?$/, error: "Enter an http or https URL" }).max(2000);
 const recipientIds = z
   .array(z.uuid())
@@ -76,7 +80,7 @@ export const updateNotificationSchema = z
   });
 
 // A member's own notifications: email about reviews of changes they opened.
-export const personalNotificationSchema = z.object({ enabled: z.boolean(), events });
+export const personalNotificationSchema = z.object({ enabled: z.boolean(), events: eventList(REVIEW_EVENTS) });
 
 // How many failed deliveries in a row pause a target; 0 never does.
 export const notificationSettingsSchema = z.object({

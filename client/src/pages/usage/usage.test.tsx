@@ -115,6 +115,39 @@ describe("Usage page", () => {
     expect(within(totals).getByText("Estimated, not actual billing")).toBeInTheDocument()
   })
 
+  it("shows this month's budget only when one is set", async () => {
+    mockApi({
+      "GET /api/reviews": { reviews: [], total: 0 },
+      "GET /api/usage?period=7d": report(),
+      ...recentRoutes(),
+      "GET /api/settings/budget": {
+        monthlyBudgetUsd: 10,
+        month: "2026-11",
+        spendUsd: 11.5,
+        percent: 115,
+        unpricedCalls: 0,
+        unpricedModels: [],
+        alertsSent: [],
+        budgetTargets: 1,
+        adminEmail: false,
+      },
+    })
+    renderWithProviders(<App />, { route: "/usage" })
+
+    const meter = await screen.findByRole("meter", { name: "Spend this month" })
+    expect(meter).toHaveAttribute("aria-valuenow", "100")
+    expect(meter).toHaveAttribute("aria-valuetext", "115% of the monthly budget")
+    expect(screen.getByRole("link", { name: "Budget settings" })).toHaveAttribute("href", "/llm-connections?tab=prices")
+  })
+
+  it("leaves the budget out when none is set", async () => {
+    mockApi({ "GET /api/reviews": { reviews: [], total: 0 }, "GET /api/usage?period=7d": report(), ...recentRoutes() })
+    renderWithProviders(<App />, { route: "/usage" })
+
+    expect(await screen.findByRole("region", { name: "Usage totals" })).toBeInTheDocument()
+    expect(screen.queryByRole("meter")).not.toBeInTheDocument()
+  })
+
   it("refetches for another period and keeps it in the URL", async () => {
     const fetchSpy = mockApi({
       "GET /api/usage?period=7d": report(),

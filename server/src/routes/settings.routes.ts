@@ -1,5 +1,6 @@
 import express, { Router } from "express";
 import { createToken, listTokens, revokeToken } from "../controllers/apiTokens.controller.ts";
+import { getBudget, saveBudget } from "../controllers/budget.controller.ts";
 import { deleteModelPrice, getModelPriceLookup, getModelPrices, saveModelPrice } from "../controllers/modelPrices.controller.ts";
 import { AVATAR_MAX_BYTES, AVATAR_TYPES, removeAvatar, uploadAvatar } from "../controllers/avatar.controller.ts";
 import {
@@ -46,6 +47,11 @@ settingsRouter.get("/model-prices", getModelPrices);
 settingsRouter.get("/model-prices/lookup", getModelPriceLookup);
 settingsRouter.put("/model-prices", requireWorkspaceRole("admin"), saveModelPrice);
 settingsRouter.delete("/model-prices/:id", requireWorkspaceRole("admin"), deleteModelPrice);
+// The monthly budget is read by every member (the Usage page shows it); only
+// admins change it.
+settingsRouter.use("/budget", requireWorkspace);
+settingsRouter.get("/budget", getBudget);
+settingsRouter.put("/budget", requireWorkspaceRole("admin"), saveBudget);
 settingsRouter.delete("/account", authLimiter, deleteAccount);
 // Cookie only: these are ways into the account.
 settingsRouter.get("/identities", requireSession, listIdentities);

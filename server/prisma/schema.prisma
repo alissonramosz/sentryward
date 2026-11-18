@@ -78,6 +78,9 @@ model Workspace {
   // Notification targets are paused after this many deliveries in a row fail
   // for good (retries exhausted or refused); 0 never pauses them.
   notifyAutoPauseAfter Int  @default(5) @map("notify_auto_pause_after")
+  // USD per UTC calendar month; null is no budget. Only notifies: reviews
+  // never stop over it (worker/budgetAlerts.ts).
+  monthlyBudgetUsd Float?   @map("monthly_budget_usd")
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -92,6 +95,7 @@ model Workspace {
   notifications   NotificationTarget[]
   privacy         WorkspacePrivacy?
   llmRequestLogs  LlmRequestLog[]
+  budgetAlerts    BudgetAlert[]
 
   @@map("workspaces")
 }
@@ -843,8 +847,49 @@ enum NotificationEvent {
   // Not blocked, after the previous finished review of the same change was.
   resolved
   completed
+  // The workspace's month's spend crossed a budget threshold. Not about a
+  // review, so a target's repository, severity and digest settings ignore it.
+  budget
 
   @@map("notification_event")
+}
+
+// A budget threshold announced for a workspace's month: at most one row per
+// threshold and month, so each alert goes out once. Thresholds crossed
+// together are all recorded and only the highest is announced.
+model BudgetAlert {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  // The first instant of the UTC month.
+  month       DateTime @db.Timestamptz
+  // A percentage of the budget: 50, 75, 90, 100, or 110 for over budget.
+  threshold   Int
+  // What the month had spent and the budget then, as announced.
+  spendUsd    Float    @map("spend_usd")
+  budgetUsd   Float    @map("budget_usd")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  // The owners and admins still owed this alert by email: the outbox for
+  // that mail, written in the transaction that records the threshold, so a
+  // worker dying after the commit cannot lose it (worker/budgetAlerts.ts).
+  // Only the announced row of a pass has any. User ids rather than
+  // addresses, so a retry mails the current address and skips anyone no
+  // longer an owner or admin.
+  adminUserIds       String[]  @default([]) @map("admin_user_ids") @db.Uuid
+  // The BudgetPayload, so a retry sends what the first attempt did; cleared
+  // once nobody is owed the mail.
+  adminEmailPayload  Json?     @map("admin_email_payload")
+  // Sends started so far; a claim counts one before sending.
+  adminEmailAttempts Int       @default(0) @map("admin_email_attempts")
+  // Set while a worker is sending; a stale lock means that worker died.
+  adminEmailLockedAt DateTime? @map("admin_email_locked_at") @db.Timestamptz
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, month, threshold])
+  @@index([createdAt])
+  // The admin email claim looks only at this month's rows.
+  @@index([month])
+  @@map("budget_alerts")
 }
 
 // How a target receives reviews: one message each, or a digest of the
