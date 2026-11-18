@@ -984,7 +984,8 @@ fewer findings); the repository filter applies to every event. Deleting a
 repository, or the connection it came through, removes it from every target's
 list; a target left with none is paused ("Paused: its repositories were
 removed") rather than widened to every repository, and cannot be switched back
-on until repositories (or All) are saved when editing it. The list shows a
+on until repositories (or All) are saved when editing it. A target that listens
+only for the Budget event keeps running, since its scope does not apply. The list shows a
 target's scope under its name, for example "acme/payments · ≥ major · verdict
 changes".
 
@@ -1404,16 +1405,20 @@ because of it.
 - **Alerts:** at 50, 75, 90 and 100% of the budget, and an over-budget alert
   once the spend passes 110%. Each goes out at most once a month. When several
   thresholds are crossed at once (a budget set mid-month, or one costly
-  review), only the highest is sent and the lower ones count as sent. Raising
-  the budget mid-month never repeats an alert; lowering it can send the next
-  one up. A new month starts over.
+  review), only the highest is sent and the lower ones count as covered by it.
+  Changing the budget forgets this month's alerts for thresholds the spend no
+  longer reaches under the new amount, so raising it mid-month re-arms them,
+  while the ones still reached are not repeated; lowering it can send the next
+  one up. Removing the budget keeps the month's alerts. A new month starts
+  over.
 - **Where alerts go:** to every active workspace notification target with the
   **Budget** event (see [Notifications](#notifications)), and, when mail is
-  configured, by email to the workspace's owners and admins. An admin already
-  on an email target with the Budget event is not mailed twice. The admin
-  email is queued with the alert, so a worker restart cannot lose it, and a
-  failed one is retried on each check (up to 5 attempts) until the month
-  ends. The worker checks every 5 minutes.
+  configured, by email to the workspace's owners and admins, including any
+  also on an email target with the Budget event (that target can be paused or
+  fail, so they may get two copies rather than none). The admin email is
+  queued with the alert, so a worker restart cannot lose it, and a failed one
+  is retried 5 minutes later (up to 5 attempts) until the month ends. The
+  worker checks every 5 minutes.
 - **Prices first:** a budget can only be switched on once every model the
   workspace's reviews called in the last 90 days has a price (built-in or the
   workspace's own), since an unpriced call adds nothing to the spend. If a

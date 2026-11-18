@@ -1,6 +1,5 @@
 import { prisma } from "../lib/prisma.ts";
 import { priceFor, type ModelPrice, type PriceOverrides } from "../review/core/pricing/pricing.ts";
-import { digestModels } from "./usage.ts";
 
 // How far back the price list looks for models the workspace has used.
 const RECENT_DAYS = 90;
@@ -22,30 +21,46 @@ export async function priceOverridesFor(workspaceId: string): Promise<PriceOverr
   return Object.fromEntries(rows.map((row) => [row.model, asPrice(row)]));
 }
 
+// The models the workspace's reviews of the last RECENT_DAYS called, sorted.
+// Read in Postgres so a check reads one short list, not every review's
+// digest: the budget card asks on each view. Keep it in step with
+// digestModels (usage.ts): a model counts once it used tokens (usedTokens).
+export async function recentModels(workspaceId: string, now = new Date()): Promise<string[]> {
+  const rows = await prisma.$queryRaw<{ model: string }[]>`
+    SELECT DISTINCT u.key AS model
+    FROM review_jobs j
+    JOIN repositories r ON r.id = j.repository_id
+    JOIN forge_connections c ON c.id = r.connection_id
+    CROSS JOIN LATERAL jsonb_each(
+      CASE WHEN jsonb_typeof(j.summary->'usageByModel') = 'object'
+           THEN j.summary->'usageByModel' ELSE '{}'::jsonb END
+    ) u
+    WHERE c.workspace_id = ${workspaceId}::uuid
+      AND j.created_at >= ${new Date(now.getTime() - RECENT_DAYS * 86_400_000)}
+      AND j.status::text NOT IN ('superseded', 'skipped', 'cancelled')
+      AND (COALESCE((u.value->>'inputTokens')::numeric, 0) > 0
+           OR COALESCE((u.value->>'outputTokens')::numeric, 0) > 0)
+  `;
+  // Sorted here rather than in SQL so the order is JavaScript's, as before.
+  return rows.map((row) => row.model).sort();
+}
+
 // The workspace's prices, and the models its recent reviews called with the
 // price each would get without one and the one reviews get now (null:
 // unknown), so an admin can see which models still need a price. The current
 // price goes through priceFor, so a price saved under a shorter id counts.
 export async function listModelPrices(workspaceId: string, now = new Date()) {
-  const [prices, jobs] = await Promise.all([
+  const [prices, used] = await Promise.all([
     prisma.modelPrice.findMany({ where: { workspaceId }, select: PRICE_FIELDS, orderBy: { model: "asc" } }),
-    prisma.reviewJob.findMany({
-      where: {
-        repository: { connection: { workspaceId } },
-        createdAt: { gte: new Date(now.getTime() - RECENT_DAYS * 86_400_000) },
-        status: { notIn: ["superseded", "skipped", "cancelled"] },
-      },
-      select: { summary: true },
-    }),
+    recentModels(workspaceId, now),
   ]);
-  const used = new Set(jobs.flatMap((job) => digestModels(job.summary)));
   const overrides: PriceOverrides = Object.fromEntries(prices.map((row) => [row.model, asPrice(row)]));
   return {
     prices: prices.map(({ input, output, cached, cacheWrite, reasoning, ...rest }) => ({
       ...rest,
       price: asPrice({ input, output, cached, cacheWrite, reasoning }),
     })),
-    models: [...used].sort().map((model) => ({ model, builtIn: priceFor(model), price: priceFor(model, overrides) })),
+    models: used.map((model) => ({ model, builtIn: priceFor(model), price: priceFor(model, overrides) })),
   };
 }
 

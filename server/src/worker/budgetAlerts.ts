@@ -25,20 +25,27 @@ const defaultDeps: BudgetAlertDeps = { send: (mail) => mailer.send(mail) };
 // the workspace's row lock: two workers never announce the same threshold
 // (SKIP LOCKED), and the unique (workspace, month, threshold) row means it is
 // announced once a month whatever happens after. Target deliveries are sent
-// and retried by deliveryQueue.ts; the admin emails by sendAdminEmails, at the
-// end of every page. Returns how many alerts were announced.
+// and retried by deliveryQueue.ts; the admin emails by sendAdminEmails. Then
+// sends every admin email owed. Returns how many alerts were announced.
 //
-// The worker does not call this: it runs one runBudgetAlertPage per poll, so
-// a scan of many workspaces never holds up claiming reviews or dispatching
-// deliveries for longer than one page.
+// The worker does not call this: each poll it runs one runBudgetAlertPage and
+// one batch of sendAdminEmails, so a scan of many workspaces, or a pile of
+// owed emails, never holds up claiming reviews or dispatching deliveries for
+// longer than one page or one batch.
 export async function runBudgetAlerts(now = new Date(), deps: BudgetAlertDeps = defaultDeps): Promise<number> {
   let announced = 0;
   let after: string | null = null;
   do {
-    const page = await runBudgetAlertPage(now, after, deps);
+    const page = await runBudgetAlertPage(now, after);
     announced += page.announced;
     after = page.next;
   } while (after !== null);
+  // A full batch may mean more are owed. Rows that failed stay locked, so
+  // this ends once every claimable row has been tried.
+  let claimed: number;
+  do {
+    claimed = await sendAdminEmails(now, deps);
+  } while (claimed === ADMIN_EMAIL_BATCH);
   return announced;
 }
 
@@ -48,13 +55,11 @@ export async function runBudgetAlerts(now = new Date(), deps: BudgetAlertDeps = 
 export const BUDGET_PAGE = 50;
 const BUDGET_CONCURRENCY = 4;
 
-// Checks the next page of budgeted workspaces after `after` (by id), then sends
-// a batch of owed admin emails. `next` is the cursor for the following page,
-// or null once the scan is done.
+// Checks the next page of budgeted workspaces after `after` (by id). `next` is
+// the cursor for the following page, or null once the scan is done.
 export async function runBudgetAlertPage(
   now: Date,
   after: string | null,
-  deps: BudgetAlertDeps = defaultDeps,
   limit = BUDGET_PAGE,
 ): Promise<{ announced: number; next: string | null }> {
   const workspaces = await prisma.workspace.findMany({
@@ -72,23 +77,22 @@ export async function runBudgetAlertPage(
       return false;
     }
   });
-  try {
-    await sendAdminEmails(now, deps);
-  } catch (err) {
-    // What was claimed stays locked until the lock goes stale, then is retried.
-    console.error("[notify] budget emails failed", err);
-  }
   return {
     announced: outcomes.filter(Boolean).length,
     next: workspaces.length === limit ? workspaces[limit - 1]!.id : null,
   };
 }
 
+// NO KEY UPDATE, not UPDATE: it still keeps out another worker's check and a
+// budget being saved (saveBudget), but not the KEY SHARE lock that every insert
+// referencing the workspace takes (request logs from running reviews,
+// memberships, targets). FOR UPDATE would hold those inserts up for the whole
+// spend aggregation, and an open one would make this check skip the workspace.
 async function checkWorkspace(tx: Prisma.TransactionClient, workspaceId: string, now: Date): Promise<boolean> {
   const [workspace] = await tx.$queryRaw<{ id: string; name: string; monthly_budget_usd: number | null }[]>`
     SELECT id, name, monthly_budget_usd FROM workspaces
     WHERE id = ${workspaceId}::uuid
-    FOR UPDATE SKIP LOCKED
+    FOR NO KEY UPDATE SKIP LOCKED
   `;
   // Locked by another worker, or the budget was cleared since the list was read.
   if (!workspace?.monthly_budget_usd) return false;
@@ -98,7 +102,7 @@ async function checkWorkspace(tx: Prisma.TransactionClient, workspaceId: string,
     monthSpend(workspaceId, now, tx),
     tx.budgetAlert.findMany({ where: { workspaceId, month }, select: { threshold: true } }),
   ]);
-  const { record, announce } = dueAlert(
+  const { announce } = dueAlert(
     spend.usd,
     budget,
     sent.map((row) => row.threshold),
@@ -107,21 +111,18 @@ async function checkWorkspace(tx: Prisma.TransactionClient, workspaceId: string,
 
   const payload = budgetPayload({ id: workspace.id, name: workspace.name }, month, announce, spend, budget);
   const adminUserIds = mailer.configured() ? await adminRecipients(tx, workspaceId) : [];
-  await tx.budgetAlert.createMany({
-    data: record.map((threshold) => ({
+  await tx.budgetAlert.create({
+    data: {
       workspaceId,
       month,
-      threshold,
+      threshold: announce,
       spendUsd: spend.usd,
       budgetUsd: budget,
       createdAt: now,
-      // The admin email rides on the announced row, in this transaction, so
-      // the threshold is never recorded without it.
-      ...(threshold === announce && adminUserIds.length
-        ? { adminUserIds, adminEmailPayload: payload as unknown as Prisma.InputJsonValue }
-        : {}),
-    })),
-    skipDuplicates: true,
+      // The admin email rides on the alert row, in this transaction, so the
+      // threshold is never recorded without it.
+      ...(adminUserIds.length ? { adminUserIds, adminEmailPayload: payload as unknown as Prisma.InputJsonValue } : {}),
+    },
   });
   // Repository scope, severity filters and digest schedules are about reviews:
   // a budget is the whole workspace's, and late news about it is no news, so
@@ -148,21 +149,16 @@ async function checkWorkspace(tx: Prisma.TransactionClient, workspaceId: string,
 }
 
 // Owners and admins hear about every alert by email when mail is set up, so a
-// workspace with no listening target still finds out. One already mailed by an
-// email target listening for budget alerts is skipped.
+// workspace with no listening target still finds out. One also on an email
+// target listening for budget alerts is mailed all the same: that target can be
+// paused before it sends, or give up on a recipient for good, and a second copy
+// of an alert beats none.
 async function adminRecipients(tx: Prisma.TransactionClient, workspaceId: string): Promise<string[]> {
-  const [admins, emailTargets] = await Promise.all([
-    tx.membership.findMany({
-      where: { workspaceId, role: { in: ["owner", "admin"] } },
-      select: { userId: true },
-    }),
-    tx.notificationTarget.findMany({
-      where: { workspaceId, kind: "email", membershipId: null, active: true, events: { has: "budget" } },
-      select: { recipientIds: true },
-    }),
-  ]);
-  const covered = new Set(emailTargets.flatMap((target) => target.recipientIds));
-  return admins.map((admin) => admin.userId).filter((id) => !covered.has(id));
+  const admins = await tx.membership.findMany({
+    where: { workspaceId, role: { in: ["owner", "admin"] } },
+    select: { userId: true },
+  });
+  return admins.map((admin) => admin.userId);
 }
 
 interface ClaimedEmail {
@@ -174,56 +170,57 @@ interface ClaimedEmail {
   admin_email_locked_at: Date;
 }
 
-// Sends the admin emails still owed, claimed like target deliveries
-// (deliveryQueue.ts claimDueDeliveries): SKIP LOCKED so two workers never mail
-// the same alert at once, the attempt counted before sending, and locked_at
-// cut to milliseconds so it can serve as the claim's token. A lock older than
-// any send takes means its worker died, so the claim takes such rows back
-// itself; that can mail someone twice, which beats never mailing them. Only
-// this month's alerts are sent: late news about a budget is no news. Retries
-// follow the budget pass's interval rather than a backoff of their own.
+// Sends one batch of the admin emails still owed, claimed like target
+// deliveries (deliveryQueue.ts claimDueDeliveries): SKIP LOCKED so two workers
+// never mail the same alert at once, the attempt counted before sending, and
+// locked_at cut to milliseconds so it can serve as the claim's token. A lock
+// older than any send takes means its worker died, so the claim takes such
+// rows back itself; that can mail someone twice, which beats never mailing
+// them. Only this month's alerts are sent: late news about a budget is no news.
 //
-// Rows are claimed a batch at a time and the next batch only once this one is
-// sent, so no claimed row waits behind the others long enough for its lock to
-// go stale and another worker to mail it again. A row already handled in this
-// pass is not claimed again: one whose emails partly failed is unlocked for a
-// retry, which belongs to the next pass, not to this one's next batch.
+// The worker calls this once per poll, so a pile of owed emails drains a batch
+// at a time and never holds up claims and deliveries for longer than one. A row
+// whose emails failed stays locked, so the stale lock is its backoff: it is
+// tried again DELIVERY_LOCK_TIMEOUT_MS later, however often this runs, and
+// MAX_DELIVERY_ATTEMPTS covers a few outages' worth rather than a few polls.
+// Returns how many rows were claimed.
 export async function sendAdminEmails(
   now: Date,
   deps: BudgetAlertDeps = defaultDeps,
   batchSize = ADMIN_EMAIL_BATCH,
-): Promise<void> {
-  const handled: string[] = [];
-  for (;;) {
-    const staleBefore = new Date(Date.now() - DELIVERY_LOCK_TIMEOUT_MS);
-    const claimed = await prisma.$queryRaw<ClaimedEmail[]>`
-      UPDATE budget_alerts
-      SET admin_email_locked_at = date_trunc('milliseconds', clock_timestamp()),
-          admin_email_attempts = admin_email_attempts + 1
-      WHERE id IN (
-        SELECT id FROM budget_alerts
-        WHERE month = ${monthStart(now)}
-          AND cardinality(admin_user_ids) > 0
-          AND admin_email_attempts < ${MAX_DELIVERY_ATTEMPTS}
-          AND (admin_email_locked_at IS NULL OR admin_email_locked_at < ${staleBefore})
-          AND NOT (id = ANY(${handled}::uuid[]))
-        ORDER BY created_at, id
-        LIMIT ${batchSize}
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING id, workspace_id, admin_user_ids, admin_email_payload, admin_email_attempts, admin_email_locked_at
-    `;
-    for (const row of claimed) {
-      handled.push(row.id);
-      try {
-        await sendAdminEmail(row, deps);
-      } catch (err) {
-        // Left locked; once the lock is stale a later pass claims it again.
-        console.error(`[notify] could not email about budget alert ${row.id}`, err);
-      }
+): Promise<number> {
+  const staleBefore = new Date(Date.now() - DELIVERY_LOCK_TIMEOUT_MS);
+  // The pick is a MATERIALIZED CTE, not `WHERE id IN (subquery)`: Postgres can
+  // plan the IN as a semi join that rescans the subquery for every row it
+  // updates, and each rescan skips the rows this statement already updated
+  // and hands out the next ones, so the LIMIT stops limiting anything.
+  const claimed = await prisma.$queryRaw<ClaimedEmail[]>`
+    WITH picked AS MATERIALIZED (
+      SELECT id FROM budget_alerts
+      WHERE month = ${monthStart(now)}
+        AND cardinality(admin_user_ids) > 0
+        AND admin_email_attempts < ${MAX_DELIVERY_ATTEMPTS}
+        AND (admin_email_locked_at IS NULL OR admin_email_locked_at < ${staleBefore})
+      ORDER BY created_at, id
+      LIMIT ${batchSize}
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE budget_alerts b
+    SET admin_email_locked_at = date_trunc('milliseconds', clock_timestamp()),
+        admin_email_attempts = b.admin_email_attempts + 1
+    FROM picked
+    WHERE b.id = picked.id
+    RETURNING b.id, b.workspace_id, b.admin_user_ids, b.admin_email_payload, b.admin_email_attempts, b.admin_email_locked_at
+  `;
+  for (const row of claimed) {
+    try {
+      await sendAdminEmail(row, deps);
+    } catch (err) {
+      // Left locked; once the lock is stale a later call claims it again.
+      console.error(`[notify] could not email about budget alert ${row.id}`, err);
     }
-    if (claimed.length < batchSize) return;
   }
+  return claimed.length;
 }
 
 async function sendAdminEmail(row: ClaimedEmail, deps: BudgetAlertDeps): Promise<void> {
@@ -255,9 +252,10 @@ async function sendAdminEmail(row: ClaimedEmail, deps: BudgetAlertDeps): Promise
     );
     return;
   }
-  // Only the ones that failed are owed it still.
-  await prisma.budgetAlert.updateMany({ where: claim, data: { adminUserIds: failed, adminEmailLockedAt: null } });
+  // Only the ones that failed are owed it still. The lock is kept: it goes
+  // stale after DELIVERY_LOCK_TIMEOUT_MS, which is when the retry is due.
+  await prisma.budgetAlert.updateMany({ where: claim, data: { adminUserIds: failed } });
   console.error(
-    `[notify] ${failed.length} of ${admins.length} budget emails for workspace ${workspace} failed (attempt ${row.admin_email_attempts}); retrying next pass`,
+    `[notify] ${failed.length} of ${admins.length} budget emails for workspace ${workspace} failed (attempt ${row.admin_email_attempts}); retrying in ${DELIVERY_LOCK_TIMEOUT_MS / 60_000} min`,
   );
 }

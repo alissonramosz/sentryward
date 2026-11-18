@@ -10,7 +10,7 @@ import { executeReply } from "./executeReply.ts";
 import { runRetention } from "./retention.ts";
 import { sweepClosedChanges } from "./backlogSweep.ts";
 import { applyPendingMerges } from "../services/backlog.ts";
-import { runBudgetAlertPage } from "./budgetAlerts.ts";
+import { runBudgetAlertPage, sendAdminEmails } from "./budgetAlerts.ts";
 
 let stopping = false;
 const running = new Set<Promise<void>>();
@@ -218,6 +218,14 @@ async function loop(): Promise<void> {
       await checkBudgets();
     } catch (err) {
       console.error("[worker] budget alerts failed", err);
+    }
+    // Every poll, like dispatch, and one batch at a time: an alert announced
+    // above is mailed now, and failed sends wait out their stale lock.
+    try {
+      await sendAdminEmails(new Date());
+    } catch (err) {
+      // What was claimed stays locked until the lock goes stale, then is retried.
+      console.error("[notify] budget emails failed", err);
     }
     try {
       await dispatchDeliveries();

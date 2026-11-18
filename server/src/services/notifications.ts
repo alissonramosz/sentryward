@@ -1862,10 +1862,13 @@ export function pauseCause(reason: string | null): PauseCause | null {
 // none would read as "all repositories", so instead it is paused (and its
 // queued deliveries dropped) with SCOPE_REASON, already paused or not, and
 // cannot be switched back on until an admin saves its repositories again (see
-// updateNotification). Call in the transaction that deletes the repositories.
+// updateNotification). A target that listens only for budget alerts is left
+// running: repository scope does not apply to them, and widening it to "all
+// repositories" changes nothing it sends. Call in the transaction that deletes
+// the repositories.
 export async function dropRepositoriesFromTargets(tx: Prisma.TransactionClient, repositoryIds: string[]) {
   if (!repositoryIds.length) return;
-  const rows = await tx.$queryRaw<{ id: string; remaining: number }[]>`
+  const rows = await tx.$queryRaw<{ id: string; remaining: number; events: string[] }[]>`
     UPDATE notification_targets
     SET repository_ids = ARRAY(
       SELECT id FROM unnest(repository_ids) AS id WHERE id <> ALL(${repositoryIds}::uuid[])
@@ -1873,10 +1876,11 @@ export async function dropRepositoriesFromTargets(tx: Prisma.TransactionClient, 
     -- A raw UPDATE skips Prisma's @updatedAt.
     updated_at = now()
     WHERE repository_ids && ${repositoryIds}::uuid[]
-    RETURNING id, cardinality(repository_ids) AS remaining
+    RETURNING id, cardinality(repository_ids) AS remaining, events::text[] AS events
   `;
   for (const row of rows) {
     if (row.remaining > 0) continue;
+    if (row.events.length > 0 && row.events.every((event) => event === "budget")) continue;
     await tx.notificationTarget.update({ where: { id: row.id }, data: { active: false, pausedReason: SCOPE_REASON } });
     await dropPendingDeliveries(tx, row.id);
   }
