@@ -94,6 +94,23 @@ const commentEvent = (body: string, extra: Record<string, unknown> = {}) => ({
 
 const LONG = "Please wrap database calls in the repository layer, not here.";
 
+function trackFinding(repositoryId: string, number: number, fingerprint = "0123456789abcdef") {
+  return prisma.finding.create({
+    data: {
+      repositoryId,
+      number,
+      fingerprint,
+      title: "Raw SQL in handler",
+      file: "src/billing/api.ts",
+      startLine: 12,
+      severity: "major",
+      category: "bug",
+      kind: "issue",
+      changeTitle: "Billing",
+    },
+  });
+}
+
 beforeEach(async () => {
   await prisma.workspace.deleteMany();
   await prisma.user.deleteMany();
@@ -165,6 +182,36 @@ describe("capturing review comments", () => {
     expect(stub.calls).toHaveLength(0);
   });
 
+  it("knows a Sentryward thread by its root's marker when the local row no longer names it", async () => {
+    const repo = await githubRepo();
+    await enable();
+    await trackFinding(repo.id, 42);
+    // The finding was posted again, so its row names the newer comment.
+    await prisma.postedFinding.create({ data: { repositoryId: repo.id, number: 42, fingerprint: "0123456789abcdef", forgeCommentId: "900" } });
+    const stub = fetchStub([
+      {
+        method: "POST",
+        url: /\/app\/installations\/55\/access_tokens$/,
+        body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      },
+      {
+        url: /\/repos\/acme\/web\/pulls\/comments\/700$/,
+        body: { id: 700, body: "**Bug**\n<!-- sentryward:fp=0123456789abcdef -->", user: { login: "sentryward-test[bot]" } },
+      },
+      { url: /\/repos\/acme\/web\/pulls\/comments\/650$/, body: { id: 650, body: "Why not the repo layer?", user: { login: "bob" } } },
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+
+    await sendGithub("pull_request_review_comment", commentEvent(LONG, { in_reply_to_id: 700 }));
+    expect(await prisma.reviewComment.count()).toBe(0);
+    // The reply queue read the same root without a second call.
+    expect(stub.calls.filter((call) => call.url.endsWith("/pulls/comments/700"))).toHaveLength(1);
+
+    // A thread people started on the same change is still evidence.
+    await sendGithub("pull_request_review_comment", commentEvent(LONG, { id: 702, in_reply_to_id: 650 }));
+    expect(await prisma.reviewComment.count()).toBe(1);
+  });
+
   it("stores a GitLab diff note from a developer", async () => {
     const repo = await gitlabRepo();
     await enable();
@@ -200,6 +247,35 @@ describe("capturing review comments", () => {
     await sendGitlab(repo.id, note(2, LONG));
     expect(await prisma.reviewComment.count()).toBe(1);
   });
+
+  it("asks GitLab once per note who the author is, though both handlers need it", async () => {
+    const repo = await gitlabRepo();
+    await enable();
+    await trackFinding(repo.id, 7);
+    const stub = fetchStub([
+      { url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } },
+      { url: /\/merge_requests\/7\/discussions\/disc9$/, body: { id: "disc9", notes: [{ id: 1, body: "Why here?", author: { username: "bob" } }] } },
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+
+    await sendGitlab(repo.id, {
+      object_kind: "note",
+      user: { id: 5, username: "alice" },
+      object_attributes: {
+        id: 2,
+        noteable_type: "MergeRequest",
+        type: "DiffNote",
+        discussion_id: "disc9",
+        note: LONG,
+        position: { new_path: "lib/db.rb", new_line: 4 },
+      },
+      merge_request: { iid: 7, last_commit: { id: "glsha" } },
+    });
+
+    expect(await prisma.reviewComment.count()).toBe(1);
+    expect(stub.calls.filter((call) => call.url.includes("/members/all/5"))).toHaveLength(1);
+    expect(stub.calls.filter((call) => call.url.includes("/discussions/disc9"))).toHaveLength(1);
+  });
 });
 
 function item(ref: string, overrides: Partial<EvidenceItem> = {}): EvidenceItem {
@@ -219,6 +295,9 @@ function item(ref: string, overrides: Partial<EvidenceItem> = {}): EvidenceItem 
 describe("learning engine", () => {
   it("normalizes titles and areas", () => {
     expect(normalizeTitle("Unused import `foo` on line 12")).toBe(normalizeTitle("Unused import `bar` on line 3"));
+    expect(normalizeTitle("Unused import 'foo'")).toBe("unused import");
+    // Apostrophes are not quotes.
+    expect(normalizeTitle("Don't log the user's token")).toBe("don t log the user s token");
     expect(areaOf("src/billing/api/x.ts")).toBe("src/billing");
     expect(areaOf("README.md")).toBe(".");
   });
@@ -363,6 +442,32 @@ describe("worker run", () => {
     expect(await prisma.llmRequestLog.findFirst({ where: { workspaceId } })).toMatchObject({ purpose: "rule_suggest", outcome: "ok" });
   });
 
+  it("never brings back a discarded rule, even one the prompt no longer lists", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    const discarded = (id: string, daysAgo: number) => ({
+      workspaceId,
+      status: "discarded" as const,
+      rule: { id, description: "d", severity: "minor" },
+      rationale: "",
+      evidence: { findingIds: [], commentIds: [], changes: 2, excerpts: [] },
+      model: "m",
+      decidedAt: new Date(Date.now() - daysAgo * 86_400_000),
+    });
+    // The oldest of 21, past the 20 the prompt shows.
+    await prisma.ruleSuggestion.createMany({
+      data: [discarded("db-in-repos", 30), ...Array.from({ length: 20 }, (_, i) => discarded(`other-${i}`, i))],
+    });
+    const { runDeps } = deps((request: { prompt: string }) => {
+      expect(request.prompt).not.toContain("db-in-repos");
+      return draft(["c1", "c2", "c3"]);
+    });
+
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ created: 0 });
+    expect(await prisma.ruleSuggestion.count({ where: { status: "pending" } })).toBe(0);
+  });
+
   it("skips the call when the privacy policy refuses the model", async () => {
     const repo = await githubRepo();
     await enable({ ruleSuggestionsMinEvidence: 2 });
@@ -409,6 +514,26 @@ describe("rule suggestions API", () => {
     expect(res.status).toBe(200);
     expect(res.body.counts).toEqual({ pending: 1, approved: 0, discarded: 0 });
     expect(res.body.suggestions[0].rule).toEqual(RULE);
+  });
+
+  it("counts suggestions without listing them", async () => {
+    await suggestion();
+    const res = await request(app).get("/api/rule-suggestions/counts").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ counts: { pending: 1, approved: 0, discarded: 0 } });
+  });
+
+  it("drops pending suggestions with their repository, keeping decided ones", async () => {
+    const repo = await githubRepo();
+    const pending = await suggestion(repo.id);
+    const decided = await suggestion(repo.id);
+    await prisma.ruleSuggestion.update({ where: { id: decided.id }, data: { status: "approved", decidedAt: new Date() } });
+    vi.stubGlobal("fetch", fetchStub([]).fetch);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect((await request(app).delete(`/api/repos/${repo.id}`).set("Cookie", cookie)).status).toBe(204);
+    expect(await prisma.ruleSuggestion.findUnique({ where: { id: pending.id } })).toBeNull();
+    expect(await prisma.ruleSuggestion.findUniqueOrThrow({ where: { id: decided.id } })).toMatchObject({ repositoryId: null });
   });
 
   it("approves into the global settings, edited, once", async () => {
@@ -500,6 +625,35 @@ describe("rule suggestions API", () => {
     expect((await save({ enabled: false, minEvidence: 4, excludedReviewers: [] })).body.storedComments).toBe(0);
   });
 
+  it("drops comment excerpts with the comments: an excluded reviewer's suggestions, then all when turned off", async () => {
+    const repo = await githubRepo();
+    await enable();
+    const excerpt = (kind: string, text: string) => ({ kind, repository: "github.com/acme/web", number: 1, file: "a.ts", text });
+    const make = (excerpts: object[]) =>
+      prisma.ruleSuggestion.create({
+        data: { workspaceId, rule: RULE, rationale: "", evidence: { findingIds: [], commentIds: [], changes: 2, excerpts }, model: "m" },
+      });
+    const bobs = await make([excerpt("comment", "bob said"), excerpt("dismissal", "Raw SQL: ours")]);
+    const alices = await make([excerpt("comment", "alice said")]);
+    await prisma.reviewComment.createMany({
+      data: [
+        { repositoryId: repo.id, number: 1, forgeCommentId: "1", author: "Bob", body: LONG, file: "a.ts", suggestionId: bobs.id },
+        { repositoryId: repo.id, number: 1, forgeCommentId: "2", author: "alice", body: LONG, file: "a.ts", suggestionId: alices.id },
+      ],
+    });
+    const save = (body: object) => request(app).put("/api/rule-suggestions/settings").set("Cookie", cookie).send(body);
+    const excerptsOf = async (id: string) =>
+      ((await prisma.ruleSuggestion.findUniqueOrThrow({ where: { id } })).evidence as { excerpts: { text: string }[] }).excerpts.map((e) => e.text);
+
+    await save({ enabled: true, minEvidence: 4, excludedReviewers: ["bob"] });
+    expect(await excerptsOf(bobs.id)).toEqual(["Raw SQL: ours"]);
+    expect(await excerptsOf(alices.id)).toEqual(["alice said"]);
+
+    await save({ enabled: false, minEvidence: 4, excludedReviewers: [] });
+    expect(await excerptsOf(alices.id)).toEqual([]);
+    expect(await excerptsOf(bobs.id)).toEqual(["Raw SQL: ours"]);
+  });
+
   it("starts a run at most once an hour", async () => {
     const run = () => request(app).post("/api/rule-suggestions/run").set("Cookie", cookie);
     expect((await run()).status).toBe(409);
@@ -513,7 +667,7 @@ describe("rule suggestions API", () => {
 });
 
 describe("retention", () => {
-  it("deletes old comments and trims old excerpts", async () => {
+  it("deletes old comments and trims old excerpts with no privacy period", async () => {
     const repo = await githubRepo();
     const old = new Date(Date.now() - 40 * 86_400_000);
     await prisma.reviewComment.createMany({
@@ -522,19 +676,34 @@ describe("retention", () => {
         { repositoryId: repo.id, number: 1, forgeCommentId: "2", author: "a", body: LONG, file: "a.ts" },
       ],
     });
+    const evidence = { findingIds: [], commentIds: ["1"], changes: 2, excerpts: [{ text: "words" }] };
     await prisma.ruleSuggestion.create({
-      data: {
-        workspaceId,
-        rule: { id: "x", description: "y", severity: "minor" },
-        rationale: "",
-        evidence: { findingIds: [], commentIds: ["1"], changes: 2, excerpts: [{ text: "words" }] },
-        model: "m",
-        createdAt: old,
-      },
+      data: { workspaceId, rule: { id: "x", description: "y", severity: "minor" }, rationale: "", evidence, model: "m", createdAt: old },
     });
 
-    // No privacy period: only the 90-day window applies.
+    // No privacy period: only the 90-day window applies, to excerpts too.
     expect(await pruneRuleHistory(null, { workspaceIds: [workspaceId] })).toEqual({ comments: 0, excerpts: 0 });
+    expect(await pruneRuleHistory(null, { workspaceIds: [workspaceId], now: new Date(Date.now() + 60 * 86_400_000) })).toEqual({
+      comments: 1,
+      excerpts: 1,
+    });
+    expect((await prisma.ruleSuggestion.findFirstOrThrow()).evidence).toMatchObject({ commentIds: ["1"], excerpts: [] });
+  });
+
+  it("trims excerpts on a privacy period, pending or not", async () => {
+    const repo = await githubRepo();
+    const old = new Date(Date.now() - 40 * 86_400_000);
+    await prisma.reviewComment.createMany({
+      data: [
+        { repositoryId: repo.id, number: 1, forgeCommentId: "1", author: "a", body: LONG, file: "a.ts", createdAt: old },
+        { repositoryId: repo.id, number: 1, forgeCommentId: "2", author: "a", body: LONG, file: "a.ts" },
+      ],
+    });
+    const evidence = { findingIds: [], commentIds: ["1"], changes: 2, excerpts: [{ text: "words" }] };
+    await prisma.ruleSuggestion.create({
+      data: { workspaceId, rule: { id: "x", description: "y", severity: "minor" }, rationale: "", evidence, model: "m", createdAt: old },
+    });
+
     expect(await pruneRuleHistory(30, { workspaceIds: [workspaceId] })).toEqual({ comments: 1, excerpts: 1 });
     expect((await prisma.ruleSuggestion.findFirstOrThrow()).evidence).toMatchObject({ commentIds: ["1"], excerpts: [] });
   });

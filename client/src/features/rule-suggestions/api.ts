@@ -64,6 +64,16 @@ export function useRuleSuggestions(status: SuggestionStatus, options: { enabled?
   })
 }
 
+// Counts alone, for the nav badge: the list carries every suggestion's
+// evidence excerpts. Under KEY, so whatever refreshes the list refreshes this.
+export function useRuleSuggestionCounts(options: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: [...KEY, "counts"],
+    queryFn: () => api<Pick<SuggestionList, "counts">>("/rule-suggestions/counts"),
+    enabled: options.enabled ?? true,
+  })
+}
+
 export function useRuleSuggestionSettings(options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: SETTINGS_KEY,

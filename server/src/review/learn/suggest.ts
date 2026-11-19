@@ -37,11 +37,12 @@ export const HISTORY_MS = 90 * 24 * 60 * 60 * 1000;
 export const MIN_CHANGES = 2;
 
 // Lowercased, with quoted names and numbers dropped, so "Unused import `foo`"
-// and "Unused import `bar`" fall together.
+// and "Unused import `bar`" fall together. A single quote inside a word is an
+// apostrophe ("don't", "user's"), not the start of a quoted name.
 export function normalizeTitle(title: string): string {
   return title
     .toLowerCase()
-    .replace(/`[^`]*`|"[^"]*"|'[^']*'/g, " ")
+    .replace(/`[^`]*`|"[^"]*"|(?<![a-z0-9])'[^']*'(?![a-z0-9])/g, " ")
     .replace(/[0-9]+/g, " ")
     .replace(/[^a-z\s]/g, " ")
     .split(/\s+/)

@@ -1,4 +1,5 @@
 import { HttpError } from "../../lib/httpError.ts";
+import { once } from "../../lib/once.ts";
 import { parseJson, parseReviewCommand, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
 import type { ForgeConnection } from "../../generated/prisma/client.ts";
 import { GitLabAdapter } from "../../review/forge/gitlab.ts";
@@ -153,15 +154,21 @@ export const gitlabProvider: ProviderDefinition = {
       ) {
         const user = payload.user;
         const forge = adapterFor(repo.connection);
-        const allowed = async () => (await forge.memberAccessLevel(repo.externalId, user.id)) >= DEVELOPER;
+        const number = payload.merge_request.iid;
+        const threadId = attrs.discussion_id;
+        // Both handlers may ask who the author is and what opened the
+        // discussion; each forge call is made once per delivery.
+        const allowed = once(async () => (await forge.memberAccessLevel(repo.externalId, user.id)) >= DEVELOPER);
+        const threadRoot = once(() => forge.getThreadRoot({ project: repo.fullPath, number }, threadId));
         // Rule suggestion evidence when the workspace learns rules. Every note
         // of a discussion arrives with its id, so a discussion Sentryward opened
         // is skipped there, as are its own notes by their markers.
         await recordReviewComment({
           repo,
-          number: payload.merge_request.iid,
+          number,
           commentId: String(attrs.id),
-          threadId: attrs.discussion_id,
+          threadId,
+          threadRoot,
           author: user.username,
           body: attrs.note ?? "",
           file: attrs.position?.new_path ?? attrs.position?.old_path,
@@ -172,13 +179,14 @@ export const gitlabProvider: ProviderDefinition = {
         return recordThreadReply({
           repo,
           forge,
-          number: payload.merge_request.iid,
-          threadId: attrs.discussion_id,
+          number,
+          threadId,
           commentId: String(attrs.id),
           actor: user.username,
           body: attrs.note ?? "",
           botLogin: false,
           allowed,
+          threadRoot,
         });
       }
 

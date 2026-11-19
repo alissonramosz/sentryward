@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
-import type { Prisma } from "../generated/prisma/client.ts";
+import { Prisma } from "../generated/prisma/client.ts";
 import { dashboardOverrideSchema, type DashboardOverride, type Rule } from "../review/config/schema.ts";
 import {
   approveRuleSuggestionSchema,
@@ -32,6 +32,12 @@ const suggestionSelect = {
   repository: { select: { id: true, host: true, fullPath: true, followGlobal: true } },
 } satisfies Prisma.RuleSuggestionSelect;
 
+async function suggestionCounts(workspaceId: string) {
+  const counts = await prisma.ruleSuggestion.groupBy({ by: ["status"], where: { workspaceId }, _count: { _all: true } });
+  const count = (name: string) => counts.find((row) => row.status === name)?._count._all ?? 0;
+  return { pending: count("pending"), approved: count("approved"), discarded: count("discarded") };
+}
+
 export async function listRuleSuggestions(req: Request, res: Response) {
   const { status } = listRuleSuggestionsQuerySchema.parse(req.query);
   const workspaceId = req.workspaceId!;
@@ -42,13 +48,15 @@ export async function listRuleSuggestions(req: Request, res: Response) {
       orderBy: { createdAt: "desc" },
       take: LIST_LIMIT,
     }),
-    prisma.ruleSuggestion.groupBy({ by: ["status"], where: { workspaceId }, _count: { _all: true } }),
+    suggestionCounts(workspaceId),
   ]);
-  const count = (name: string) => counts.find((row) => row.status === name)?._count._all ?? 0;
-  res.json({
-    suggestions,
-    counts: { pending: count("pending"), approved: count("approved"), discarded: count("discarded") },
-  });
+  res.json({ suggestions, counts });
+}
+
+// Counts alone, for the nav badge on every page: the list carries each
+// suggestion's evidence excerpts.
+export async function countRuleSuggestions(req: Request, res: Response) {
+  res.json({ counts: await suggestionCounts(req.workspaceId!) });
 }
 
 async function settingsBody(workspaceId: string) {
@@ -75,8 +83,27 @@ export async function getRuleSuggestionSettings(req: Request, res: Response) {
   res.json(await settingsBody(req.workspaceId!));
 }
 
-// Turning suggestions off deletes the review comments kept for them: they were
-// stored only for this. Cited dismissals stay, as findings in their own right.
+// Drops the review comment excerpts (people's words) from the workspace's
+// suggestions, or only from those listed. Dismissal excerpts stay with the
+// findings they quote. Excerpts name no author, so a suggestion loses all its
+// comment excerpts, not only one reviewer's.
+async function stripCommentExcerpts(tx: Prisma.TransactionClient, workspaceId: string, suggestionIds?: string[]) {
+  const scope = suggestionIds ? Prisma.sql`AND id = ANY(${suggestionIds}::uuid[])` : Prisma.empty;
+  await tx.$executeRaw`
+    UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', COALESCE(
+      (SELECT jsonb_agg(e) FROM jsonb_array_elements(evidence->'excerpts') e WHERE e->>'kind' IS DISTINCT FROM 'comment'),
+      '[]'::jsonb
+    ))
+    WHERE workspace_id = ${workspaceId}::uuid
+      AND jsonb_typeof(evidence->'excerpts') = 'array'
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(evidence->'excerpts') e WHERE e->>'kind' = 'comment')
+      ${scope}
+  `;
+}
+
+// Turning suggestions off deletes the review comments kept for them, and the
+// excerpts quoting them: they were stored only for this. Cited dismissals
+// stay, as findings in their own right.
 export async function saveRuleSuggestionSettings(req: Request, res: Response) {
   const { enabled, minEvidence, excludedReviewers } = saveRuleSuggestionSettingsSchema.parse(req.body);
   const workspaceId = req.workspaceId!;
@@ -92,11 +119,21 @@ export async function saveRuleSuggestionSettings(req: Request, res: Response) {
     const inWorkspace = { repository: { connection: { workspaceId } } };
     if (!enabled) {
       await tx.reviewComment.deleteMany({ where: inWorkspace });
+      await stripCommentExcerpts(tx, workspaceId);
     } else if (excludedReviewers.length) {
-      // An excluded reviewer's comments are not kept, including those already stored.
-      await tx.reviewComment.deleteMany({
-        where: { ...inWorkspace, OR: excludedReviewers.map((login) => ({ author: { equals: login, mode: "insensitive" as const } })) },
+      // An excluded reviewer's comments are not kept, including those already
+      // stored, nor the excerpts of suggestions that cited them.
+      const where = {
+        ...inWorkspace,
+        OR: excludedReviewers.map((login) => ({ author: { equals: login, mode: "insensitive" as const } })),
+      };
+      const cited = await tx.reviewComment.findMany({
+        where: { ...where, suggestionId: { not: null } },
+        select: { suggestionId: true },
+        distinct: ["suggestionId"],
       });
+      await tx.reviewComment.deleteMany({ where });
+      if (cited.length) await stripCommentExcerpts(tx, workspaceId, cited.map((row) => row.suggestionId!));
     }
   });
   res.json(await settingsBody(workspaceId));
@@ -159,8 +196,11 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
 
   const suggestion = await prisma.$transaction(async (tx) => {
     await lockPending(tx, workspaceId, id);
-    // Under the workspace row lock, like the other writers of reviewSettings,
-    // so a global save meanwhile is not overwritten with a stale copy.
+    // Under the workspace row lock, so concurrent approvals each add to the
+    // latest settings. The global settings save (updateGlobalConfig) replaces
+    // the whole object without it, so a settings form left open can still
+    // drop this rule; the client refreshes the global config on approve to
+    // keep that window short.
     const [workspace] = await tx.$queryRaw<{ review_settings: unknown }[]>`
       SELECT review_settings FROM workspaces WHERE id = ${workspaceId}::uuid FOR NO KEY UPDATE
     `;

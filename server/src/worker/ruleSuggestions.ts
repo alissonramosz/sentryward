@@ -170,13 +170,15 @@ async function knownRules(workspaceId: string, globalSettings: unknown) {
   const [repos, pending, discarded] = await Promise.all([
     prisma.repository.findMany({ where: { connection: { workspaceId } }, select: { settings: true, directories: true } }),
     prisma.ruleSuggestion.findMany({ where: { workspaceId, status: "pending" }, select: { rule: true } }),
+    // Every discarded rule, not only those the prompt shows: the model may
+    // ignore the prompt, and a discarded id must never come back.
     prisma.ruleSuggestion.findMany({
       where: { workspaceId, status: "discarded" },
       select: { rule: true },
       orderBy: { decidedAt: "desc" },
-      take: MAX_DISCARDED_SHOWN,
     }),
   ]);
+  const discardedRules = discarded.flatMap((row) => rulesIn({ rules: [row.rule] }));
   const existing = new Map<string, KnownRule>();
   const add = (rules: KnownRule[]) => rules.forEach((rule) => existing.has(rule.id) || existing.set(rule.id, rule));
   add(rulesIn(globalSettings));
@@ -189,10 +191,14 @@ async function knownRules(workspaceId: string, globalSettings: unknown) {
   const pendingRules = pending.flatMap((row) => rulesIn({ rules: [row.rule] }));
   // `.sentryward.yaml` rules are not known here; an approved rule that clashes
   // with one is reported by the review that reads the file, like any clash.
-  const takenIds = new Set([...existing.keys(), ...pendingRules.map((rule) => rule.id)]);
+  const takenIds = new Set([
+    ...existing.keys(),
+    ...pendingRules.map((rule) => rule.id),
+    ...discardedRules.map((rule) => rule.id),
+  ]);
   return {
     existingRules: [...existing.values(), ...pendingRules],
-    discarded: discarded.flatMap((row) => rulesIn({ rules: [row.rule] })),
+    discarded: discardedRules.slice(0, MAX_DISCARDED_SHOWN),
     takenIds,
   };
 }

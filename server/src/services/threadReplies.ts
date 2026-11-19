@@ -3,6 +3,7 @@ import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { parseReply } from "../lib/webhook.ts";
 import { markersIn, REPLY_MARKER } from "../review/core/markers.ts";
+import type { ThreadRoot } from "../review/forge/types.ts";
 import type { Forge, RepoWithConnection, WebhookOutcome } from "./providers/types.ts";
 import { isUniqueViolation } from "./users.ts";
 
@@ -28,6 +29,9 @@ export interface ThreadReplyInput {
   // Whether the author may act on the repository; asked only once the reply is
   // known not to be the bot's own.
   allowed: () => Promise<boolean>;
+  // The thread's first comment, when the caller shares the lookup with
+  // recordReviewComment; read from the forge here otherwise.
+  threadRoot?: () => Promise<ThreadRoot | null>;
 }
 
 // Records a person's reply on one of Sentryward's inline threads for the worker
@@ -49,10 +53,10 @@ export async function recordThreadReply(input: ThreadReplyInput): Promise<Webhoo
   const tracked = await prisma.finding.findFirst({ where: { repositoryId: repo.id, number }, select: { id: true } });
   if (!tracked) return { body: { outcome: "ignored" } };
 
-  let root: Awaited<ReturnType<Forge["getThreadRoot"]>>;
+  let root: ThreadRoot | null;
   try {
     if (!(await input.allowed())) return { body: { outcome: "not_allowed" } };
-    root = await forge.getThreadRoot({ project: repo.fullPath, number }, threadId);
+    root = await (input.threadRoot ? input.threadRoot() : forge.getThreadRoot({ project: repo.fullPath, number }, threadId));
   } catch (err) {
     // Not retried here: the forge is waiting on this response. A failed
     // delivery shows in its webhook log, where it can be redelivered.

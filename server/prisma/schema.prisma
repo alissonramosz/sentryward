@@ -828,8 +828,8 @@ model RuleSuggestion {
   // A ruleSchema value (review/config/schema.ts).
   rule          Json
   rationale     String
-  // { findingIds, commentIds, changes, excerpts }; excerpts are trimmed by
-  // retention once the suggestion is decided.
+  // { findingIds, commentIds, changes, excerpts }; excerpts are trimmed with
+  // the comments they quote (privacy period, or 90 days), whatever the status.
   evidence      Json
   model         String
   // "global" or the repository id the approved rule was saved to.

@@ -1730,8 +1730,9 @@ admins turn it on under **Workspace → Rule suggestions**; it is off by default
   monthly budget, which sum review runs.
 - **What comes back:** at most five rules, each citing the comments and
   dismissals behind it. A draft whose rule is invalid (including a pattern RE2
-  rejects), whose id is already used in the workspace or by a pending
-  suggestion, or that cites too little evidence is dropped. Each comment or
+  rejects), whose id is already used in the workspace, by a pending
+  suggestion or by a discarded one, or that cites too little evidence is
+  dropped. Each comment or
   dismissal backs one suggestion at most, so the same history does not
   suggest the same rule twice.
 - **Approving:** nothing changes until an owner or admin approves. The rule can
@@ -1739,7 +1740,8 @@ admins turn it on under **Workspace → Rule suggestions**; it is off by default
   repository's own settings (suggested from where the evidence came from),
   through the same checks as saving those settings by hand. A repository that
   follows the global config cannot take one. Discarded suggestions are shown to
-  later runs as rules not to propose again.
+  later runs as rules not to propose again, and their ids are never accepted
+  again. Removing a repository deletes the suggestions still pending for it.
 
 Dismissals only help when their note states a convention: a rule adds a check,
 it cannot silence a finding.
@@ -1806,8 +1808,11 @@ that limit both.
   with their login, file and line. Deleted after 90 days (sooner under a
   shorter retention period), and all at once when the feature is turned off.
 - **Rule suggestions** (`rule_suggestions`): drafted rules and excerpts of the
-  comments and dismissals behind them. Retention clears the excerpts with the
-  rest; the rule and evidence counts stay.
+  comments and dismissals behind them. Excerpts are cleared on the same
+  schedule as review comments (90 days, or sooner under a shorter retention
+  period), pending or not; comment excerpts also go when the feature is turned
+  off, or from the suggestions that cited a reviewer once they are excluded.
+  The rule and evidence counts stay.
 - **Credentials**: forge tokens, GitHub App installations, LLM API keys and
   notification URLs, encrypted with `ENCRYPTION_KEY` (AES-256-GCM). Only the
   last four characters of a key are ever shown.
@@ -2153,11 +2158,12 @@ Workspace owners and admins only. See [Rule suggestions](#rule-suggestions).
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | GET    | `/api/rule-suggestions?status=` | `pending` (default), `approved` or `discarded` suggestions, newest first (up to 100), plus `counts` per status |
+| GET    | `/api/rule-suggestions/counts` | `{ counts }` per status alone, for the nav badge |
 | GET    | `/api/rule-suggestions/settings` | `{ enabled, minEvidence, excludedReviewers, lastRunAt, storedComments }` |
-| PUT    | `/api/rule-suggestions/settings` | `{ enabled, minEvidence (2-50), excludedReviewers }`. Turning it off deletes the stored review comments; excluding a reviewer deletes theirs |
+| PUT    | `/api/rule-suggestions/settings` | `{ enabled, minEvidence (2-50), excludedReviewers }`. Turning it off deletes the stored review comments and the comment excerpts of suggestions; excluding a reviewer deletes theirs and the comment excerpts of suggestions that cited them |
 | POST   | `/api/rule-suggestions/run` | Makes the workspace due, so the worker checks within about 10 minutes. 409 when off, 429 within an hour of the last run |
 | POST   | `/api/rule-suggestions/:id/approve` | `{ "rule", "target": "global" \| { "repositoryId" } }`. Adds the (possibly edited) rule to that layer; 400 for an id already there or a limit, 409 for a repository that follows the global config |
-| POST   | `/api/rule-suggestions/:id/discard` | Discards it; later runs are told not to propose it again |
+| POST   | `/api/rule-suggestions/:id/discard` | Discards it; later runs are told not to propose it again, and a draft reusing its id is dropped |
 
 </details>
 

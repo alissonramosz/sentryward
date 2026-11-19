@@ -35,6 +35,7 @@ const suggestion: RuleSuggestion = {
 const list = (suggestions: RuleSuggestion[]) => ({ suggestions, counts: { pending: suggestions.length, approved: 0, discarded: 0 } })
 const PENDING = "GET /api/rule-suggestions?status=pending"
 const base = {
+  "GET /api/rule-suggestions/counts": { counts: { pending: 0, approved: 0, discarded: 0 } },
   "GET /api/rule-suggestions/settings": settings,
   "GET /api/repos": { repos: [] },
   "GET /api/config/schema": { severities: ["critical", "major", "minor", "info"], categories: ["bug", "maintainability"] },

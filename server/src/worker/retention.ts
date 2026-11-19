@@ -286,7 +286,9 @@ export async function pruneBacklog(
 // Review comments are kept only as rule suggestion evidence, which looks back
 // HISTORY_MS, so none outlive that whatever the privacy period; a shorter
 // period deletes them sooner. Suggestions keep ids and counts of their
-// evidence, but its excerpts (people's words) go with the comments.
+// evidence, but its excerpts (people's words) go with the comments, on the
+// same cutoff and whatever the suggestion's status: privacy outranks an admin
+// still deciding.
 export async function pruneRuleHistory(
   days: number | null,
   { now = new Date(), batchSize = 1000, workspaceIds }: PruneOptions = {},
@@ -305,12 +307,10 @@ export async function pruneRuleHistory(
     }
     if (rows.length < batchSize) break;
   }
-  if (days === null) return { comments, excerpts: 0 };
-  const excerptCutoff = new Date(now.getTime() - days * DAY_MS);
   const scope = workspaceIds ? Prisma.sql`AND workspace_id = ANY(${workspaceIds}::uuid[])` : Prisma.empty;
   const excerpts = await prisma.$executeRaw`
     UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', '[]'::jsonb)
-    WHERE created_at < ${excerptCutoff}
+    WHERE created_at < ${cutoff}
       AND jsonb_typeof(evidence->'excerpts') = 'array' AND jsonb_array_length(evidence->'excerpts') > 0
       ${scope}
   `;

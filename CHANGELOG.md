@@ -14,19 +14,24 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   admins turn it on from the new **Rule suggestions** page (Workspace). While
   on, comments people with push access leave on changed lines are stored
   (`review_comments`) from the GitHub and GitLab webhooks already received,
-  skipping bots, commands, Sentryward's own threads and excluded reviewers.
+  skipping bots, commands, Sentryward's own threads (recognised by the thread
+  root's marker when the posted-comment record no longer names it) and
+  excluded reviewers.
   Once a week per workspace (or on **Check now**, at most hourly) the worker
   groups the last 90 days of comments and false-positive or intentional
   dismissals, and when something recurs across at least two changes and the
   minimum evidence, asks the workspace's review model for at most five rules
   (audited as `rule_suggest`, privacy restrictions applied). Drafts with an
-  invalid rule, a taken id or too little evidence are dropped, and each
+  invalid rule, a taken id (including any discarded suggestion's) or too
+  little evidence are dropped, and each
   comment or dismissal backs one suggestion at most. Suggestions wait for an
   admin, who can edit one and approve it into the global settings or a
   repository's own settings through the same checks as a manual save, or
-  discard it. New endpoints under `/api/rule-suggestions`; review comments are
-  deleted after 90 days, by privacy retention, and when the feature is turned
-  off. The page leads with the suggestions: settings fold into a header showing
+  discard it. New endpoints under `/api/rule-suggestions` (`/counts` feeds the
+  nav badge without loading the list); review comments and the suggestion
+  excerpts quoting them are deleted after 90 days, by privacy retention, and
+  when the feature is turned off, and an excluded reviewer's go with them.
+  Removing a repository deletes its pending suggestions. The page leads with the suggestions: settings fold into a header showing
   whether learning is on, the last check and **Check now** (open by default only
   while off). Cards carry the rule's severity colour, the rationale and a
   foldable evidence summary. Discarding asks for confirmation, and approving into

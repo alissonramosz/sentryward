@@ -160,6 +160,20 @@ describe("DashboardLayout", () => {
       expect(screen.getByRole("link", { name: "Repositories" })).toBeInTheDocument()
     })
 
+    it("counts pending rule suggestions without loading the list", async () => {
+      const list = vi.fn(() => jsonResponse(200, { suggestions: [], counts: { pending: 0, approved: 0, discarded: 0 } }))
+      mockApi({
+        "GET /api/rule-suggestions/counts": { counts: { pending: 2, approved: 0, discarded: 0 } },
+        "GET /api/rule-suggestions": list,
+      })
+      renderOn("/usage")
+
+      expect(
+        await screen.findByRole("link", { name: /^Rule suggestions\W+2 rule suggestions to review$/ }),
+      ).toBeInTheDocument()
+      expect(list).not.toHaveBeenCalled()
+    })
+
     it("hides the failed count while the Reviews list is open", async () => {
       mockApi({ "GET /api/reviews/attention": { failed: 2, since: "" } })
       renderOn("/reviews")

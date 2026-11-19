@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   approveRuleSuggestion,
+  countRuleSuggestions,
   discardRuleSuggestion,
   getRuleSuggestionSettings,
   listRuleSuggestions,
@@ -17,7 +18,8 @@ export const ruleSuggestionsRouter = Router();
 // approving one changes review settings.
 ruleSuggestionsRouter.use(userLimiter, requireAuth, requireWorkspace, requireWorkspaceRole("admin"));
 ruleSuggestionsRouter.get("/", listRuleSuggestions);
-// Before "/:id/...", so "settings" and "run" are never read as ids.
+// Before "/:id/...", so "counts", "settings" and "run" are never read as ids.
+ruleSuggestionsRouter.get("/counts", countRuleSuggestions);
 ruleSuggestionsRouter.get("/settings", getRuleSuggestionSettings);
 ruleSuggestionsRouter.put("/settings", saveRuleSuggestionSettings);
 ruleSuggestionsRouter.post("/run", runRuleSuggestions);

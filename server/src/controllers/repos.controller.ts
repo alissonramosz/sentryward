@@ -343,7 +343,9 @@ export async function removeDirectory(req: Request, res: Response) {
 
 // Review jobs and posted findings go with it (cascade), so re-adding the
 // repository later starts without history. Notification filters drop it in the
-// same step.
+// same step, as do rule suggestions still pending for it: with no repository
+// they would read as suggestions for the global settings. Decided ones keep
+// their history without it.
 export async function deleteRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
   const repo = await loadOwnedRepo(req.workspaceId!, id);
@@ -351,6 +353,7 @@ export async function deleteRepo(req: Request, res: Response) {
   await removeWebhook(repo, repo.connection).catch(() => undefined);
   await prisma.$transaction(async (tx) => {
     await dropRepositoriesFromTargets(tx, [id]);
+    await tx.ruleSuggestion.deleteMany({ where: { repositoryId: id, status: "pending" } });
     await tx.repository.delete({ where: { id } });
   });
   res.status(204).end();

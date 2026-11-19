@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.ts";
 import { REVIEW_COMMAND } from "../lib/webhook.ts";
 import { markersIn, REPLY_MARKER } from "../review/core/markers.ts";
+import type { ThreadRoot } from "../review/forge/types.ts";
 import type { RepoWithConnection } from "./providers/types.ts";
 import { isUniqueViolation } from "./users.ts";
 
@@ -19,6 +20,10 @@ export interface ReviewCommentInput {
   // GitLab: discussion id). A reply in one of Sentryward's threads is the reply
   // queue's (threadReplies.ts), not evidence: it is about a finding, not the code.
   threadId?: string;
+  // Reads the thread's first comment from the forge (shared with the reply
+  // queue, so one delivery costs one call). Only asked when the thread is not
+  // known locally and the change holds findings.
+  threadRoot?: () => Promise<ThreadRoot | null>;
   author: string | undefined;
   body: string;
   file: string | undefined;
@@ -63,15 +68,9 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
   if (text.includes(REPLY_MARKER) || markersIn(text).length > 0) return "skipped";
   const excluded = new Set(workspace.ruleSuggestionsExcludedReviewers.map((login) => login.toLowerCase()));
   if (excluded.has(author.toLowerCase())) return "skipped";
-  if (input.threadId) {
-    // A thread Sentryward opened is known locally by its first comment's id.
-    const own = await prisma.postedFinding.findFirst({
-      where: { repositoryId: repo.id, number, forgeCommentId: input.threadId },
-      select: { id: true },
-    });
-    if (own) return "skipped";
-  }
+  if (input.threadId && (await postedThread(input))) return "skipped";
   if (!(await input.allowed())) return "not_allowed";
+  if (input.threadId && (await markedThread(input))) return "skipped";
 
   try {
     await prisma.reviewComment.create({
@@ -91,4 +90,26 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
     if (isUniqueViolation(err)) return "duplicate";
     throw err;
   }
+}
+
+// A reply in a thread Sentryward opened is the reply queue's. Such a thread is
+// usually known locally by its first comment's id, at no forge cost.
+async function postedThread({ repo, number, threadId }: ReviewCommentInput): Promise<boolean> {
+  const posted = await prisma.postedFinding.findFirst({
+    where: { repositoryId: repo.id, number, forgeCommentId: threadId },
+    select: { id: true },
+  });
+  return Boolean(posted);
+}
+
+// The local row is replaced when the finding is posted again, purged by
+// retention, or never held the comment id (GitHub's review fallback), so an
+// unknown thread on a change with findings is checked on the forge by its
+// root's marker. The marker, not the author: a token connection posts as a
+// person.
+async function markedThread({ repo, number, threadRoot }: ReviewCommentInput): Promise<boolean> {
+  if (!threadRoot) return false;
+  const tracked = await prisma.finding.findFirst({ where: { repositoryId: repo.id, number }, select: { id: true } });
+  if (!tracked) return false;
+  return Boolean((await threadRoot())?.fingerprint);
 }

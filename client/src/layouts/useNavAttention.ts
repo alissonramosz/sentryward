@@ -3,7 +3,7 @@ import { useConnectionStatuses, useConnections } from "@/features/forge/api"
 import { useApiKeys, useApiKeyStatuses } from "@/features/llm-connections/api"
 import { isCheckable, needsAttention } from "@/features/llm-connections/health"
 import { useReviewAttention } from "@/features/reviews/api"
-import { useRuleSuggestions } from "@/features/rule-suggestions/api"
+import { useRuleSuggestionCounts } from "@/features/rule-suggestions/api"
 
 // What a nav item flags: a count (failed reviews) or a warning dot. The label
 // is the screen-reader and tooltip text, so the state never rests on color.
@@ -28,7 +28,7 @@ export function useNavAttention(pathname: string): Record<string, NavAttention |
   // Only admins see the page, and only they may read the list.
   const { workspace } = useAuth()
   const workspaceAdmin = workspace?.role === "owner" || workspace?.role === "admin"
-  const pending = useRuleSuggestions("pending", { enabled: workspaceAdmin }).data?.counts.pending ?? 0
+  const pending = useRuleSuggestionCounts({ enabled: workspaceAdmin }).data?.counts.pending ?? 0
 
   const connections = useConnections().data?.connections ?? EMPTY
   const connectionStatuses = useConnectionStatuses(connections, { live: false })

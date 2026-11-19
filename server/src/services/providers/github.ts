@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { env } from "../../config/env.ts";
 import { HttpError } from "../../lib/httpError.ts";
+import { once } from "../../lib/once.ts";
 import { prisma } from "../../lib/prisma.ts";
 import { parseJson, parseReviewCommand, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
 import type { ForgeConnection } from "../../generated/prisma/client.ts";
@@ -197,29 +198,37 @@ export async function handleGithubEvent(
 
   if (isDiffComment(event, payload)) {
     const comment = payload.comment!;
+    const number = payload.pull_request!.number;
+    const threadId = comment.in_reply_to_id ? String(comment.in_reply_to_id) : undefined;
+    const forge = adapterFor(repo.connection);
+    const allowed = async () => TRUSTED.has(comment.author_association);
+    // Both handlers may need the thread's root; one forge call serves them.
+    const threadRoot = threadId ? once(() => forge.getThreadRoot({ project: repo.fullPath, number }, threadId)) : undefined;
     const stored = await recordReviewComment({
       repo,
-      number: payload.pull_request!.number,
+      number,
       commentId: String(comment.id),
-      threadId: comment.in_reply_to_id ? String(comment.in_reply_to_id) : undefined,
+      threadId,
+      threadRoot,
       author: comment.user?.login,
       body: comment.body ?? "",
       file: comment.path,
       line: comment.line,
       isSelf: comment.user?.type === "Bot",
-      allowed: async () => TRUSTED.has(comment.author_association),
+      allowed,
     });
-    if (!comment.in_reply_to_id) return { body: { outcome: stored === "stored" ? "recorded" : "ignored" } };
+    if (!threadId) return { body: { outcome: stored === "stored" ? "recorded" : "ignored" } };
     return recordThreadReply({
       repo,
-      forge: adapterFor(repo.connection),
-      number: payload.pull_request!.number,
-      threadId: String(comment.in_reply_to_id),
+      forge,
+      number,
+      threadId,
       commentId: String(comment.id),
       actor: comment.user?.login,
       body: comment.body,
       botLogin: repo.connection.kind !== "token",
-      allowed: async () => TRUSTED.has(comment.author_association),
+      allowed,
+      threadRoot,
     });
   }
 
