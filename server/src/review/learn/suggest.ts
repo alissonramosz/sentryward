@@ -23,6 +23,9 @@ export interface EvidenceItem {
   // The dismissal's note or the comment's body: untrusted, written by people
   // on the change.
   text: string;
+  // When the comment was left or the finding dismissed: retention expires the
+  // stored excerpt by this, not by the suggestion's age.
+  at: Date;
 }
 
 // What reaches the model is bounded however much history there is: excerpts
@@ -184,11 +187,13 @@ export interface StoredEvidence {
   // Distinct changes cited, so the page can say "across N changes" after the
   // excerpts are trimmed.
   changes: number;
-  excerpts: { kind: EvidenceItem["kind"]; repository: string; number: number; file: string; text: string }[];
+  // `at` (ISO) is the source's time; excerpts stored before it existed lack it.
+  excerpts: { kind: EvidenceItem["kind"]; repository: string; number: number; file: string; text: string; at?: string }[];
 }
 
-// What a suggestion keeps of its evidence. Excerpts are trimmed by retention
-// once it is decided; the ids and counts stay.
+// What a suggestion keeps of its evidence. Each excerpt is trimmed by
+// retention once the comment or dismissal it quotes is past the cutoff; the
+// ids and counts stay.
 export function storedEvidence(items: EvidenceItem[]): StoredEvidence {
   return {
     findingIds: items.filter((item) => item.kind === "dismissal").map((item) => item.id),
@@ -200,6 +205,7 @@ export function storedEvidence(items: EvidenceItem[]): StoredEvidence {
       number: item.number,
       file: item.file,
       text: (item.kind === "dismissal" ? [item.title, item.text].filter(Boolean).join(": ") : item.text).slice(0, MAX_EXCERPT_CHARS),
+      at: item.at.toISOString(),
     })),
   };
 }

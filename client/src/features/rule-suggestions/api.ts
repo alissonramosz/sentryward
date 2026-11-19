@@ -13,6 +13,8 @@ export interface SuggestionExcerpt {
   number: number
   file: string
   text: string
+  // When the quoted comment or dismissal was made (absent on older rows).
+  at?: string
 }
 
 export interface RuleSuggestion {

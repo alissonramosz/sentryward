@@ -14,7 +14,8 @@ import {
 } from "../src/review/learn/suggest.ts";
 import { repairRuleSuggestOutput, ruleSuggestOutputSchema, ruleSuggestUserPrompt, toDrafts } from "../src/review/llm/ruleSuggest.ts";
 import { mergePolicy, OPEN_LAYER, policyFor } from "../src/services/privacyPolicy.ts";
-import { pruneRuleHistory } from "../src/worker/retention.ts";
+import { recordReviewComment } from "../src/services/reviewComments.ts";
+import { pruneRuleHistory, runRetention } from "../src/worker/retention.ts";
 import { runNextRuleSuggestions, type RuleSuggestionDeps } from "../src/worker/ruleSuggestions.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { fakeModel } from "./helpers/model.ts";
@@ -164,6 +165,37 @@ describe("capturing review comments", () => {
     expect(await prisma.reviewComment.count()).toBe(0);
   });
 
+  it("re-checks the settings before storing, as they may change during the forge calls", async () => {
+    const repo = await prisma.repository.findFirstOrThrow({ where: { id: (await githubRepo()).id }, include: { connection: true } });
+    await enable();
+    const input = (commentId: string, allowed: () => Promise<boolean>) => ({
+      repo,
+      number: 1,
+      commentId,
+      author: "alice",
+      body: LONG,
+      file: "a.ts",
+      line: 3,
+      isSelf: false,
+      allowed,
+    });
+
+    // Turned off while the push-access check was in flight.
+    const off = input("1", async () => {
+      await prisma.workspace.update({ where: { id: workspaceId }, data: { ruleSuggestionsEnabled: false } });
+      return true;
+    });
+    expect(await recordReviewComment(off)).toBe("off");
+    // The author excluded meanwhile.
+    await enable();
+    const excluded = input("2", async () => {
+      await prisma.workspace.update({ where: { id: workspaceId }, data: { ruleSuggestionsExcludedReviewers: ["Alice"] } });
+      return true;
+    });
+    expect(await recordReviewComment(excluded)).toBe("skipped");
+    expect(await prisma.reviewComment.count()).toBe(0);
+  });
+
   it("leaves replies in Sentryward's threads to the reply queue", async () => {
     const repo = await githubRepo();
     await enable();
@@ -288,6 +320,7 @@ function item(ref: string, overrides: Partial<EvidenceItem> = {}): EvidenceItem 
     number: Number(ref.slice(1)),
     file: "src/billing/api.ts",
     text: LONG,
+    at: new Date("2026-01-02T03:04:05Z"),
     ...overrides,
   };
 }
@@ -344,6 +377,7 @@ describe("learning engine", () => {
     const stored = storedEvidence([item("c1"), item("d2", { kind: "dismissal", title: "Raw SQL", text: "ours" })]);
     expect(stored).toMatchObject({ findingIds: ["id-d2"], commentIds: ["id-c1"], changes: 2 });
     expect(stored.excerpts[1]!.text).toBe("Raw SQL: ours");
+    expect(stored.excerpts[0]!.at).toBe("2026-01-02T03:04:05.000Z");
   });
 
   it("wraps history as untrusted and repairs loose model output", () => {
@@ -706,5 +740,30 @@ describe("retention", () => {
 
     expect(await pruneRuleHistory(30, { workspaceIds: [workspaceId] })).toEqual({ comments: 1, excerpts: 1 });
     expect((await prisma.ruleSuggestion.findFirstOrThrow()).evidence).toMatchObject({ commentIds: ["1"], excerpts: [] });
+  });
+
+  it("trims each excerpt by the age of what it quotes, not the suggestion's", async () => {
+    const day = 86_400_000;
+    const excerpt = (text: string, age: number) => ({ kind: "comment", repository: "r", number: 1, file: "a.ts", text, at: new Date(Date.now() - age * day).toISOString() });
+    const evidence = { findingIds: [], commentIds: [], changes: 2, excerpts: [excerpt("old", 40), excerpt("new", 5), excerpt("older", 50)] };
+    // Created just now, quoting history already past a 30-day period.
+    await prisma.ruleSuggestion.create({
+      data: { workspaceId, rule: { id: "x", description: "y", severity: "minor" }, rationale: "", evidence, model: "m" },
+    });
+
+    expect(await pruneRuleHistory(30, { workspaceIds: [workspaceId] })).toEqual({ comments: 0, excerpts: 1 });
+    const kept = (await prisma.ruleSuggestion.findFirstOrThrow()).evidence as { excerpts: { text: string }[] };
+    expect(kept.excerpts.map((e) => e.text)).toEqual(["new"]);
+    expect(await pruneRuleHistory(30, { workspaceIds: [workspaceId] })).toEqual({ comments: 0, excerpts: 0 });
+  });
+
+  it("counts excerpts trimmed for workspaces with no privacy period", async () => {
+    const at = new Date(Date.now() - 100 * 86_400_000).toISOString();
+    const evidence = { findingIds: [], commentIds: [], changes: 2, excerpts: [{ kind: "comment", repository: "r", number: 1, file: "a.ts", text: "w", at }] };
+    await prisma.ruleSuggestion.create({
+      data: { workspaceId, rule: { id: "x", description: "y", severity: "minor" }, rationale: "", evidence, model: "m" },
+    });
+
+    expect(await runRetention()).toMatchObject({ suggestionExcerpts: 1 });
   });
 });

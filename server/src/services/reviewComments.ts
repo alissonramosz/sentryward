@@ -72,19 +72,34 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
   if (!(await input.allowed())) return "not_allowed";
   if (input.threadId && (await markedThread(input))) return "skipped";
 
+  const file = input.file;
   try {
-    await prisma.reviewComment.create({
-      data: {
-        repositoryId: repo.id,
-        number,
-        forgeCommentId: input.commentId,
-        author,
-        body: text.slice(0, MAX_COMMENT_BODY),
-        file: input.file,
-        line: input.line ?? null,
-      },
+    return await prisma.$transaction(async (tx): Promise<ReviewCommentOutcome> => {
+      // The settings may have changed during the forge calls above. Read them
+      // again under a share lock: turning suggestions off (or excluding a
+      // reviewer) updates this row before deleting stored comments, so either
+      // that waits for this insert and deletes it, or this sees the new
+      // settings. FOR KEY SHARE would not conflict with that update.
+      const [current] = await tx.$queryRaw<{ enabled: boolean; excluded: string[] }[]>`
+        SELECT rule_suggestions_enabled AS enabled, rule_suggestions_excluded_reviewers AS excluded
+        FROM workspaces WHERE id = ${repo.connection.workspaceId}::uuid
+        FOR SHARE
+      `;
+      if (!current?.enabled) return "off";
+      if (current.excluded.some((login) => login.toLowerCase() === author.toLowerCase())) return "skipped";
+      await tx.reviewComment.create({
+        data: {
+          repositoryId: repo.id,
+          number,
+          forgeCommentId: input.commentId,
+          author,
+          body: text.slice(0, MAX_COMMENT_BODY),
+          file,
+          line: input.line ?? null,
+        },
+      });
+      return "stored";
     });
-    return "stored";
   } catch (err) {
     // The forge redelivered an event already recorded.
     if (isUniqueViolation(err)) return "duplicate";

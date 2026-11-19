@@ -108,6 +108,8 @@ export async function saveRuleSuggestionSettings(req: Request, res: Response) {
   const { enabled, minEvidence, excludedReviewers } = saveRuleSuggestionSettingsSchema.parse(req.body);
   const workspaceId = req.workspaceId!;
   await prisma.$transaction(async (tx) => {
+    // First, so the row lock is held before any deletion: recordReviewComment
+    // re-checks these settings under a share lock on this row before storing.
     await tx.workspace.update({
       where: { id: workspaceId },
       data: {

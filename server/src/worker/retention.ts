@@ -286,8 +286,8 @@ export async function pruneBacklog(
 // Review comments are kept only as rule suggestion evidence, which looks back
 // HISTORY_MS, so none outlive that whatever the privacy period; a shorter
 // period deletes them sooner. Suggestions keep ids and counts of their
-// evidence, but its excerpts (people's words) go with the comments, on the
-// same cutoff and whatever the suggestion's status: privacy outranks an admin
+// evidence, but its excerpts (people's words) go once what they quote is past
+// the same cutoff, whatever the suggestion's status: privacy outranks an admin
 // still deciding.
 export async function pruneRuleHistory(
   days: number | null,
@@ -308,10 +308,20 @@ export async function pruneRuleHistory(
     if (rows.length < batchSize) break;
   }
   const scope = workspaceIds ? Prisma.sql`AND workspace_id = ANY(${workspaceIds}::uuid[])` : Prisma.empty;
+  // Each excerpt by its source's time: a new suggestion may quote a comment or
+  // dismissal already near the cutoff. One stored without `at` falls back to
+  // the suggestion's own age.
   const excerpts = await prisma.$executeRaw`
-    UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', '[]'::jsonb)
-    WHERE created_at < ${cutoff}
-      AND jsonb_typeof(evidence->'excerpts') = 'array' AND jsonb_array_length(evidence->'excerpts') > 0
+    UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', COALESCE(
+      (SELECT jsonb_agg(x.e ORDER BY x.i) FROM jsonb_array_elements(evidence->'excerpts') WITH ORDINALITY x(e, i)
+       WHERE COALESCE((x.e->>'at')::timestamptz, created_at) >= ${cutoff}),
+      '[]'::jsonb
+    ))
+    WHERE jsonb_typeof(evidence->'excerpts') = 'array'
+      AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(evidence->'excerpts') e
+        WHERE COALESCE((e->>'at')::timestamptz, created_at) < ${cutoff}
+      )
       ${scope}
   `;
   return { comments, excerpts };
@@ -444,7 +454,9 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     result.suggestionExcerpts += history.excerpts;
   }
   if (unlimited.length) {
-    result.reviewComments += (await pruneRuleHistory(null, { now, workspaceIds: unlimited })).comments;
+    const history = await pruneRuleHistory(null, { now, workspaceIds: unlimited });
+    result.reviewComments += history.comments;
+    result.suggestionExcerpts += history.excerpts;
   }
 
   if (instance.auditRetentionDays !== null) {

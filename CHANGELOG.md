@@ -16,7 +16,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   (`review_comments`) from the GitHub and GitLab webhooks already received,
   skipping bots, commands, Sentryward's own threads (recognised by the thread
   root's marker when the posted-comment record no longer names it) and
-  excluded reviewers.
+  excluded reviewers. The opt-in and exclusions are checked again under a lock
+  on the workspace just before a comment is stored, so a comment arriving while
+  the feature is turned off is never kept.
   Once a week per workspace (or on **Check now**, at most hourly) the worker
   groups the last 90 days of comments and false-positive or intentional
   dismissals, and when something recurs across at least two changes and the
@@ -31,6 +33,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   nav badge without loading the list); review comments and the suggestion
   excerpts quoting them are deleted after 90 days, by privacy retention, and
   when the feature is turned off, and an excluded reviewer's go with them.
+  Each excerpt expires by the age of the comment or dismissal it quotes, not
+  the suggestion's, and the retention log counts excerpts trimmed for
+  workspaces without a privacy period.
   Removing a repository deletes its pending suggestions. The page leads with the suggestions: settings fold into a header showing
   whether learning is on, the last check and **Check now** (open by default only
   while off). Cards carry the rule's severity colour, the rationale and a

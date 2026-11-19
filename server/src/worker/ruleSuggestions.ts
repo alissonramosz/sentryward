@@ -99,6 +99,7 @@ async function loadEvidence(workspaceId: string, excluded: string[], now: Date):
         title: true,
         ignoreReason: true,
         ignoreNote: true,
+        ignoredAt: true,
         repository: { select: { host: true, fullPath: true } },
       },
       orderBy: { ignoredAt: "desc" },
@@ -113,6 +114,7 @@ async function loadEvidence(workspaceId: string, excluded: string[], now: Date):
         file: true,
         author: true,
         body: true,
+        createdAt: true,
         repository: { select: { host: true, fullPath: true } },
       },
       orderBy: { createdAt: "desc" },
@@ -135,6 +137,8 @@ async function loadEvidence(workspaceId: string, excluded: string[], now: Date):
         title: row.title,
         reason: row.ignoreReason ?? undefined,
         text: row.ignoreNote ?? "",
+        // Filtered on above, so never null here.
+        at: row.ignoredAt!,
       }),
     ),
     ...comments
@@ -149,6 +153,7 @@ async function loadEvidence(workspaceId: string, excluded: string[], now: Date):
           number: row.number,
           file: row.file,
           text: row.body,
+          at: row.createdAt,
         }),
       ),
   ];
