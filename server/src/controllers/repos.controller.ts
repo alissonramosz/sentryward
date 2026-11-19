@@ -201,16 +201,6 @@ export async function updateRepo(req: Request, res: Response) {
   const existing = await loadOwnedRepo(req.workspaceId!, id);
 
   await requireSettingsConnection(req.workspaceId!, settings);
-  // Only the repository settings are checked here: folder rules a change to
-  // them leaves out are reported as review warnings, as for the global config.
-  if (settings?.rules?.length) {
-    const issues = repoSettingsRuleIssues({
-      globalSettings: existing.connection.workspace.reviewSettings,
-      repoSettings: settings,
-      followGlobal: followGlobal ?? existing.followGlobal,
-    });
-    if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
-  }
 
   // Turning a repository on or off by hand overrides any access-loss marker,
   // so a reinstall no longer flips it back.
@@ -218,6 +208,16 @@ export async function updateRepo(req: Request, res: Response) {
   // The cancel commits with the update, so a repository is never left off with
   // jobs still in flight. A job claimed just before finds it off in runJob.
   const updated = await prisma.$transaction(async (tx) => {
+    if (settings !== undefined) {
+      // Under the same row lock as folder changes, so a folder saved meanwhile
+      // is checked against these settings too.
+      await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+      const saved = await tx.repository.findUniqueOrThrow({
+        where: { id },
+        select: { settings: true, directories: true, followGlobal: true },
+      });
+      requireRepoSettingsRules(existing.connection.workspace.reviewSettings, saved, settings, followGlobal ?? saved.followGlobal);
+    }
     const row = await tx.repository.update({
       where: { id },
       data: { enabled, settings, followGlobal, accessLostAt },
@@ -230,6 +230,29 @@ export async function updateRepo(req: Request, res: Response) {
   if (enabled === false) await removeWebhook(updated, existing.connection);
   const repo = await prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
   res.json({ repo, ...(webhook ? { webhook } : {}) });
+}
+
+// Repository rules the layers below would leave out are refused, and so are
+// folder rules these settings would newly push out (a repository rule taking
+// a folder rule's id, or the combined limit), since the folder would otherwise
+// lose them with only a review warning. A folder that was already broken
+// before this save stays a warning, so it does not block unrelated edits.
+function requireRepoSettingsRules(
+  globalSettings: unknown,
+  saved: { settings: unknown; directories: unknown },
+  settings: DashboardOverride,
+  followGlobal: boolean,
+) {
+  const after = repoSettingsRuleIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal });
+  if (!after.length) return;
+  const key = (issue: { directory?: number; message: string }) => `${issue.directory}:${issue.message}`;
+  const before = new Set(
+    repoSettingsRuleIssues({ globalSettings, repoSettings: saved.settings, directories: saved.directories, followGlobal: false })
+      .filter((issue) => issue.directory !== undefined)
+      .map(key),
+  );
+  const issues = after.filter((issue) => issue.directory === undefined || !before.has(key(issue)));
+  if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
 }
 
 // A chosen LLM connection must be one the workspace has stored.

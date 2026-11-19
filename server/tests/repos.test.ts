@@ -1102,6 +1102,37 @@ describe("folder settings", () => {
     expect(connection.body.errors.connection).toBeDefined();
   });
 
+  it("refuses repository rules that would push out a folder's rules, but not because of a folder already broken", async () => {
+    const repo = await monorepo();
+    await request(app).post(folders(repo.id)).set("Cookie", cookie).send({ path: "web" });
+    await request(app)
+      .put(folders(repo.id))
+      .set("Cookie", cookie)
+      .send({ path: "web", settings: { rules: [{ id: "web-rule", description: "Web.", severity: "minor" }] } });
+
+    const clash = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: { rules: [{ id: "web-rule", description: "Repo.", severity: "info" }] } });
+    expect(clash.status).toBe(400);
+    expect(clash.body.errors.rules).toEqual([
+      "web: Rule web-rule in the folder settings was ignored: a rule with that id is already set in the repository settings",
+    ]);
+    expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).settings).toEqual({});
+
+    // Once the folder is broken anyway (saved directly, as if from before this
+    // check), other repository edits still save.
+    await prisma.repository.update({
+      where: { id: repo.id },
+      data: { settings: { rules: [{ id: "web-rule", description: "Repo.", severity: "info" }] } },
+    });
+    const unrelated = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: { rules: [{ id: "web-rule", description: "Repo.", severity: "info" }, { id: "other", description: "Other.", severity: "minor" }] } });
+    expect(unrelated.status).toBe(200);
+  });
+
   it("checks only the folder being saved, so a stale one does not block the rest", async () => {
     const repo = await monorepo();
     // Valid when saved; since then its connection was removed and the

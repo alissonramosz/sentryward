@@ -23,7 +23,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   at a time (`POST`, `PUT` and `DELETE /api/repos/:id/directories`), merged
   into the saved list under a row lock, so editing one folder never drops
   another added since the page loaded, and only the folder being saved is
-  checked. `GET /api/repos/:id/config` takes `?directory=` (404 for a folder
+  checked. Saving repository settings is refused when it would make a saved
+  folder's rules be ignored (a folder that was already broken is not held
+  against the save). `GET /api/repos/:id/config` takes `?directory=` (404 for a folder
   that is not saved) and then also returns `inherited`, which the folder form
   checks rules against. A webhook close cancels queued reviews only when the
   repository and every folder keep `abort_on_close`, and a folder that
