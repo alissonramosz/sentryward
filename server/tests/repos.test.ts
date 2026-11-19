@@ -630,6 +630,58 @@ describe("GET and PUT /api/config/global", () => {
     expect(reset.body.settings).toEqual({ llm: { connection: "openai" } });
   });
 
+  it("refuses a save made from settings that changed since they were read", async () => {
+    const read = await request(app).get("/api/config/global").set("Cookie", cookie);
+    expect(read.body.revision).toEqual(expect.any(String));
+
+    const first = await request(app)
+      .put("/api/config/global")
+      .set("Cookie", cookie)
+      .send({ settings: { llm: { connection: "openai" }, profile: "strict" }, revision: read.body.revision });
+    expect(first.status).toBe(200);
+    expect(first.body.revision).not.toBe(read.body.revision);
+
+    const stale = await request(app)
+      .put("/api/config/global")
+      .set("Cookie", cookie)
+      .send({ settings: { llm: { connection: "openai" } }, revision: read.body.revision });
+    expect(stale.status).toBe(409);
+    const workspace = await prisma.workspace.findFirstOrThrow({ where: { connections: { some: { id: connectionId } } } });
+    expect(workspace.reviewSettings).toEqual({ llm: { connection: "openai" }, profile: "strict" });
+
+    // Stable across reads, and optional for API callers.
+    const again = await request(app).get("/api/config/global").set("Cookie", cookie);
+    expect(again.body.revision).toBe(first.body.revision);
+    const unchecked = await request(app)
+      .put("/api/config/global")
+      .set("Cookie", cookie)
+      .send({ settings: { llm: { connection: "openai" } } });
+    expect(unchecked.status).toBe(200);
+  });
+
+  it("refuses a repository settings save made from settings that changed since they were read", async () => {
+    const repo = await prisma.repository.create({
+      data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/stale", externalId: "11", defaultBranch: "main", followGlobal: false },
+    });
+    const listed = await request(app).get("/api/repos").set("Cookie", cookie);
+    const loaded = listed.body.repos.find((row: { id: string }) => row.id === repo.id).settingsRevision;
+    expect(loaded).toEqual(expect.any(String));
+
+    const first = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: { profile: "strict" }, settingsRevision: loaded });
+    expect(first.status).toBe(200);
+    expect(first.body.repo.settingsRevision).not.toBe(loaded);
+
+    const stale = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: {}, settingsRevision: loaded });
+    expect(stale.status).toBe(409);
+    expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).settings).toEqual({ profile: "strict" });
+  });
+
   it("rejects invalid settings", async () => {
     const res = await request(app)
       .put("/api/config/global")

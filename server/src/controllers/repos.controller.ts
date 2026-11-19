@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { Prisma, type ReviewStatus, type ReviewVerdict } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
+import { settingsRevision } from "../lib/settingsRevision.ts";
 import { dropRepositoriesFromTargets } from "../services/notifications.ts";
 import { loadReviewConfig, repoSettingsRuleIssues, resolveDashboardLayers } from "../review/config/load.ts";
 import { directorySettingsSchema, normalizeDirectory, type DashboardOverride, type DirectorySetting } from "../review/config/schema.ts";
@@ -38,6 +39,13 @@ const publicRepo = {
   createdAt: true,
 } as const;
 
+// A repository as the client sees it, with the revision its settings form
+// sends back on save (lib/settingsRevision.ts).
+async function loadPublicRepo(id: string) {
+  const repo = await prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
+  return { ...repo, settingsRevision: settingsRevision(repo.settings) };
+}
+
 // The repositories a user has added. Read from the database only, so the page
 // loads without asking the forge for every repository the account can see.
 export async function listRepos(req: Request, res: Response) {
@@ -64,6 +72,7 @@ export async function listRepos(req: Request, res: Response) {
       webUrl: `${hostOrigin(repo.connection.host)}/${repo.fullPath}`,
       enabled: repo.enabled,
       settings: repo.settings,
+      settingsRevision: settingsRevision(repo.settings),
       directories: repo.directories,
       followGlobal: repo.followGlobal,
       position: repo.position,
@@ -180,7 +189,7 @@ export async function enableRepo(req: Request, res: Response) {
   });
   // Manual reviews work either way; the webhook only adds automatic ones.
   const webhook = await ensureWebhook(saved, connection);
-  const repo = await prisma.repository.findUniqueOrThrow({ where: { id: saved.id }, select: publicRepo });
+  const repo = await loadPublicRepo(saved.id);
   res.status(201).json({ repo, webhook });
 }
 
@@ -197,7 +206,7 @@ async function loadOwnedRepo(workspaceId: string, id: string) {
 
 export async function updateRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
-  const { enabled, settings, followGlobal } = updateRepoSchema.parse(req.body);
+  const { enabled, settings, settingsRevision: revision, followGlobal } = updateRepoSchema.parse(req.body);
   const existing = await loadOwnedRepo(req.workspaceId!, id);
 
   await requireSettingsConnection(req.workspaceId!, settings);
@@ -216,6 +225,9 @@ export async function updateRepo(req: Request, res: Response) {
         where: { id },
         select: { settings: true, directories: true, followGlobal: true },
       });
+      if (revision !== undefined && revision !== settingsRevision(saved.settings)) {
+        throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
+      }
       requireRepoSettingsRules(existing.connection.workspace.reviewSettings, saved, settings, followGlobal ?? saved.followGlobal);
     }
     const row = await tx.repository.update({
@@ -228,7 +240,7 @@ export async function updateRepo(req: Request, res: Response) {
   let webhook;
   if (enabled === true) webhook = await ensureWebhook(updated, existing.connection);
   if (enabled === false) await removeWebhook(updated, existing.connection);
-  const repo = await prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
+  const repo = await loadPublicRepo(id);
   res.json({ repo, ...(webhook ? { webhook } : {}) });
 }
 
@@ -303,7 +315,7 @@ async function changeDirectories(
     }
     await tx.repository.update({ where: { id }, data: { directories: parsed.data } });
   });
-  return prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
+  return loadPublicRepo(id);
 }
 
 function requireDirectory(dirs: DirectorySetting[], path: string) {

@@ -557,6 +557,13 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- Saving the global config or a repository's settings from a page loaded
+  before someone else changed them (another admin's save, or an approved rule
+  suggestion) is refused with "changed since the page loaded; reload and try
+  again", instead of silently replacing their changes with the stale copy.
+  `GET`/`PUT /api/config/global` return a `revision` and the repository list
+  a `settingsRevision`, derived from the saved settings; the API checks them
+  when a save sends them back (optional for API callers).
 - On GitHub, `/sentryward review` now requires push access to the repository,
   checked by the commenter's repository role, as for thread replies. A comment's
   author association does not tell read and triage collaborators from writers,

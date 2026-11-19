@@ -34,6 +34,9 @@ export function GlobalConfigForm(props: {
   const schema = useConfigSchema()
   const apiKeys = useApiKeys()
   const [form, setForm] = useState<FormState>(() => toForm(global.settings))
+  // The revision the form was filled from, not the latest fetched: a refetch
+  // alone must not let a form built on older settings overwrite newer ones.
+  const [revision, setRevision] = useState(global.revision)
   // Fields left unset show what the selected profile and the defaults give.
   const inherited = schema.data && baseConfig(schema.data, form.profile === INHERIT ? undefined : form.profile)
   const finish = (settings: ConfigOverride) => (schema.data ? withoutDefaults(settings, schema.data) : settings)
@@ -47,6 +50,12 @@ export function GlobalConfigForm(props: {
     patternErrors,
   )
   const valid = Object.keys(errors).length === 0
+
+  function discard() {
+    setForm(toForm(global.settings))
+    setRevision(global.revision)
+  }
+
   const resetSettings: ConfigOverride =
     form.connection === INHERIT
       ? {}
@@ -64,8 +73,9 @@ export function GlobalConfigForm(props: {
 
   async function submit(settings: GlobalConfig["settings"], message: string) {
     try {
-      const saved = await save.mutateAsync(settings)
+      const saved = await save.mutateAsync({ settings, revision })
       setForm(toForm(saved.settings))
+      setRevision(saved.revision)
       toast.success(message)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save the global config")
@@ -99,7 +109,7 @@ export function GlobalConfigForm(props: {
           )
         }
         footer={
-          <SaveBar dirty={dirty} onDiscard={() => setForm(toForm(global.settings))} disabled={save.isPending}>
+          <SaveBar dirty={dirty} onDiscard={discard} disabled={save.isPending}>
             <Button
               onClick={() => submit(finish(toSettings(global.settings, form)), "Global config saved")}
               disabled={save.isPending || !dirty || !valid}

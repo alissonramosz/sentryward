@@ -26,11 +26,14 @@ export const enableRepoSchema = z.object({
 // `settings` replaces the saved overrides as a whole; an empty object resets
 // the repository to the global config, its profile and the defaults. Folders
 // are changed one at a time through /directories instead, so two admins
-// editing different folders never overwrite each other.
+// editing different folders never overwrite each other. `settingsRevision`
+// is the one the form loaded: a save made after the settings changed is
+// refused (lib/settingsRevision.ts). Optional for API callers.
 export const updateRepoSchema = z
   .object({
     enabled: z.boolean().optional(),
     settings: dashboardOverrideSchema.optional(),
+    settingsRevision: z.string().max(64).optional(),
     followGlobal: z.boolean().optional(),
   })
   .refine((body) => body.enabled !== undefined || body.settings !== undefined || body.followGlobal !== undefined, {

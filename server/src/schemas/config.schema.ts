@@ -3,9 +3,12 @@ import { MAX_RULE_PATTERN_CHARS, MAX_RULES, dashboardOverrideSchema } from "../r
 import { forgeProviderSchema } from "../review/core/models.ts";
 
 // Replaces the global config as a whole; an empty object resets it to the
-// profile and the defaults.
+// profile and the defaults. `revision` is the one the form loaded: a save
+// made after the settings changed is refused (lib/settingsRevision.ts).
+// Optional for API callers.
 export const updateGlobalConfigSchema = z.object({
   settings: dashboardOverrideSchema,
+  revision: z.string().max(64).optional(),
 });
 
 // The display preview: `base` is what the form inherits (the profile and

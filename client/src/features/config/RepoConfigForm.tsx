@@ -55,6 +55,8 @@ export function RepoConfigForm(props: {
   const save = useSaveRepoSettings()
   const apiKeys = useApiKeys()
   const [form, setForm] = useState<FormState>(() => toForm(repo.settings))
+  // As in GlobalConfigForm: the revision the form was filled from.
+  const [revision, setRevision] = useState(repo.settingsRevision)
   // Edits are locked while the repository follows the global config, so
   // there is nothing to lose then.
   const dirty = isDirty(repo.settings, form) && !repo.followGlobal
@@ -69,9 +71,16 @@ export function RepoConfigForm(props: {
   )
   const valid = Object.keys(errors).length === 0
 
+  function discard() {
+    setForm(toForm(repo.settings))
+    setRevision(repo.settingsRevision)
+  }
+
   async function onSave() {
     try {
-      await save.mutateAsync({ repoId: repo.id, settings: toSettings(repo.settings, form) })
+      const settings = toSettings(repo.settings, form)
+      const saved = await save.mutateAsync({ repoId: repo.id, settings, settingsRevision: revision })
+      setRevision(saved.repo.settingsRevision)
       toast.success("Settings saved")
     } catch (err) {
       // The server checks rules against the global config as saved now, which
@@ -131,7 +140,7 @@ export function RepoConfigForm(props: {
         guidanceLabel="Repository guidance"
         notices={notices}
         footer={
-          <SaveBar dirty={dirty} onDiscard={() => setForm(toForm(repo.settings))} disabled={save.isPending}>
+          <SaveBar dirty={dirty} onDiscard={discard} disabled={save.isPending}>
             <Button onClick={onSave} disabled={save.isPending || repo.followGlobal || !dirty || !valid}>
               {save.isPending && <Loader2 className="animate-spin" />}
               Save settings

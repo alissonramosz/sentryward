@@ -867,6 +867,43 @@ describe("rule suggestions API", () => {
     expect(again.status).toBe(409);
   });
 
+  it("keeps an approved rule from a settings form loaded before it", async () => {
+    const repo = await githubRepo();
+    await prisma.repository.update({ where: { id: repo.id }, data: { followGlobal: false, settings: { profile: "strict" } } });
+    const listed = await request(app).get("/api/repos").set("Cookie", cookie);
+    const loaded = listed.body.repos.find((row: { id: string }) => row.id === repo.id).settingsRevision;
+    const global = await request(app).get("/api/config/global").set("Cookie", cookie);
+
+    const toRepo = await suggestion(repo.id);
+    const approved = await request(app)
+      .post(`/api/rule-suggestions/${toRepo.id}/approve`)
+      .set("Cookie", cookie)
+      .send({ rule: RULE, target: { repositoryId: repo.id } });
+    expect(approved.status).toBe(200);
+    const toGlobal = await suggestion();
+    const other = { ...RULE, id: "global-rule" };
+    const approvedGlobal = await request(app)
+      .post(`/api/rule-suggestions/${toGlobal.id}/approve`)
+      .set("Cookie", cookie)
+      .send({ rule: other, target: "global" });
+    expect(approvedGlobal.status).toBe(200);
+
+    const staleRepo = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: { profile: "fast" }, settingsRevision: loaded });
+    expect(staleRepo.status).toBe(409);
+    expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).settings).toEqual({ profile: "strict", rules: [RULE] });
+
+    await prisma.llmCredential.create({ data: { workspaceId, provider: "openai", encryptedKey: encrypt("sk-openai-test") } });
+    const staleGlobal = await request(app)
+      .put("/api/config/global")
+      .set("Cookie", cookie)
+      .send({ settings: { llm: { connection: "openai" } }, revision: global.body.revision });
+    expect(staleGlobal.status).toBe(409);
+    expect((await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId } })).reviewSettings).toEqual({ rules: [other] });
+  });
+
   it("refuses an id the target already has", async () => {
     await prisma.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: { rules: [RULE] } } });
     const row = await suggestion();

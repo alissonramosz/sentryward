@@ -227,10 +227,10 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
 
   const suggestion = await prisma.$transaction(async (tx) => {
     // Under the workspace row lock, so concurrent approvals each add to the
-    // latest settings. The global settings save (updateGlobalConfig) replaces
-    // the whole object without it, so a settings form left open can still
-    // drop this rule; the client refreshes the global config on approve to
-    // keep that window short. Taken before the suggestion's lock, in the same
+    // latest settings. The global and repository settings saves replace the
+    // whole object, so they check the revision their form loaded and refuse a
+    // stale copy that would drop this rule (lib/settingsRevision.ts); the
+    // global save takes this same lock. Taken before the suggestion's lock, in the same
     // order as saveRuleSuggestionSettings (workspace, then suggestions), which
     // would otherwise deadlock with this.
     const [workspace] = await tx.$queryRaw<{ review_settings: unknown }[]>`

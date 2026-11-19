@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
+import { settingsRevision } from "../lib/settingsRevision.ts";
 import { CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW } from "../review/context/budget.ts";
 import { CATEGORIES, SEVERITIES } from "../review/core/severity.ts";
 import { THINKING_BUDGETS } from "../review/llm/thinking.ts";
@@ -76,19 +77,29 @@ export async function getGlobalConfig(req: Request, res: Response) {
 async function globalConfigResponse(workspaceId: string, saved: unknown) {
   const body = globalConfigBody(saved);
   const repositories = await repositoryRuleWarnings(workspaceId, saved);
-  return { ...body, warnings: [...body.warnings, ...repositories] };
+  return { ...body, revision: settingsRevision(saved), warnings: [...body.warnings, ...repositories] };
 }
 
 export async function updateGlobalConfig(req: Request, res: Response) {
-  const { settings } = updateGlobalConfigSchema.parse(req.body);
+  const { settings, revision } = updateGlobalConfigSchema.parse(req.body);
   if (!settings.llm?.connection) {
     throw new HttpError(400, "Validation failed", { connection: ["Select an LLM connection"] });
   }
   await requireStoredLlmConnection(req.workspaceId!, settings.llm.connection);
-  const workspace = await prisma.workspace.update({
-    where: { id: req.workspaceId! },
-    data: { reviewSettings: settings },
-    select: { reviewSettings: true },
+  // Under the workspace row lock a rule suggestion approval takes, so the
+  // revision check and the write cannot interleave with a rule being added.
+  const workspace = await prisma.$transaction(async (tx) => {
+    const [current] = await tx.$queryRaw<{ review_settings: unknown }[]>`
+      SELECT review_settings FROM workspaces WHERE id = ${req.workspaceId!}::uuid FOR NO KEY UPDATE
+    `;
+    if (revision !== undefined && revision !== settingsRevision(current!.review_settings)) {
+      throw new HttpError(409, "The global settings changed since the page loaded; reload and try again");
+    }
+    return tx.workspace.update({
+      where: { id: req.workspaceId! },
+      data: { reviewSettings: settings },
+      select: { reviewSettings: true },
+    });
   });
   res.json(await globalConfigResponse(req.workspaceId!, workspace.reviewSettings));
 }
