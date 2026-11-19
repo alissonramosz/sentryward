@@ -989,7 +989,7 @@ describe("retention", () => {
       data: { workspaceId, rule: { id: "x", description: "y", severity: "minor" }, rationale: "", evidence, model: "m" },
     });
 
-    expect(await pruneRuleHistory(30, { workspaceIds: [workspaceId] })).toEqual({ comments: 0, excerpts: 1 });
+    expect(await pruneRuleHistory(30, { workspaceIds: [workspaceId] })).toEqual({ comments: 0, excerpts: 2 });
     const kept = (await prisma.ruleSuggestion.findFirstOrThrow()).evidence as { excerpts: { text: string }[] };
     expect(kept.excerpts.map((e) => e.text)).toEqual(["new"]);
     expect(await pruneRuleHistory(30, { workspaceIds: [workspaceId] })).toEqual({ comments: 0, excerpts: 0 });

@@ -318,10 +318,16 @@ export async function pruneRuleHistory(
   // dismissal already near the cutoff. One stored without `at` falls back to
   // the suggestion's own age. The rows are locked in id order first, as the
   // settings save's excerpt strip does: two bulk UPDATEs locking the same rows
-  // in different orders would deadlock.
+  // in different orders would deadlock. The result counts excerpts removed,
+  // not rows changed, so it is taken from the locked read: the rows cannot
+  // change before the UPDATE, which drops exactly the excerpts counted here.
   const excerpts = await prisma.$transaction(async (tx) => {
-    const locked = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM rule_suggestions
+    const locked = await tx.$queryRaw<{ id: string; expired: number }[]>`
+      SELECT id, (
+        SELECT count(*) FROM jsonb_array_elements(evidence->'excerpts') e
+        WHERE COALESCE((e->>'at')::timestamptz, created_at) < ${cutoff}
+      )::int AS expired
+      FROM rule_suggestions
       WHERE jsonb_typeof(evidence->'excerpts') = 'array'
         AND EXISTS (
           SELECT 1 FROM jsonb_array_elements(evidence->'excerpts') e
@@ -331,7 +337,7 @@ export async function pruneRuleHistory(
       ORDER BY id FOR UPDATE
     `;
     if (!locked.length) return 0;
-    return tx.$executeRaw`
+    await tx.$executeRaw`
       UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', COALESCE(
         (SELECT jsonb_agg(x.e ORDER BY x.i) FROM jsonb_array_elements(evidence->'excerpts') WITH ORDINALITY x(e, i)
          WHERE COALESCE((x.e->>'at')::timestamptz, created_at) >= ${cutoff}),
@@ -339,6 +345,7 @@ export async function pruneRuleHistory(
       ))
       WHERE id = ANY(${locked.map((row) => row.id)}::uuid[])
     `;
+    return locked.reduce((sum, row) => sum + row.expired, 0);
   });
   return { comments, excerpts };
 }

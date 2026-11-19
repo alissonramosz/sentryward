@@ -39,8 +39,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   excerpts quoting them are deleted after 90 days, by privacy retention, and
   when the feature is turned off, and an excluded reviewer's go with them.
   Each excerpt expires by the age of the comment or dismissal it quotes, not
-  the suggestion's, and the retention log counts excerpts trimmed for
-  workspaces without a privacy period.
+  the suggestion's, and the retention log counts each excerpt trimmed (not
+  each suggestion touched), including for workspaces without a privacy period.
   A run saves its suggestions only after re-reading the opt-in under the same
   workspace lock, so turning the feature off or excluding a reviewer while the
   model is answering never brings back deleted comments: a run turned off

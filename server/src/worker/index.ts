@@ -123,7 +123,7 @@ async function prune(): Promise<void> {
         `purged ${r.changes} change(s) (${r.findings} finding(s), ${r.replies} reply(ies)), ` +
         `${r.auditRows} audit row(s), ${r.deliveries} notification delivery(ies), ${r.backlogItems} backlog item(s), ` +
         `scrubbed ${r.backlogScrubbed} dismissed backlog item(s), ${r.budgetAlerts} budget alert(s), ` +
-        `${r.reviewComments} review comment(s), trimmed evidence of ${r.suggestionExcerpts} rule suggestion(s)`,
+        `${r.reviewComments} review comment(s), trimmed ${r.suggestionExcerpts} rule suggestion excerpt(s)`,
     );
   }
 }
