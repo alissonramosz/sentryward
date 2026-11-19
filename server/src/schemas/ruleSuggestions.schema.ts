@@ -3,8 +3,22 @@ import { ruleSchema } from "../review/config/schema.ts";
 
 export const MAX_EXCLUDED_REVIEWERS = 100;
 
+// A page cursor is the last row's `<created_at in epoch microseconds>_<id>`: a
+// keyset, so it keeps working after that row is approved or discarded and
+// leaves the list. Microseconds, as Postgres keeps them: a millisecond Date
+// would skip or repeat rows created within the same millisecond.
+const listCursorSchema = z.string().transform((value, ctx) => {
+  const match = /^(\d{1,20})_(.+)$/.exec(value);
+  if (!match || !z.uuid().safeParse(match[2]).success) {
+    ctx.addIssue({ code: "custom", message: "Invalid cursor" });
+    return z.NEVER;
+  }
+  return { atMicros: match[1]!, id: match[2]! };
+});
+
 export const listRuleSuggestionsQuerySchema = z.object({
   status: z.enum(["pending", "approved", "discarded"]).default("pending"),
+  cursor: listCursorSchema.optional(),
 });
 
 export const ruleSuggestionIdParamSchema = z.object({ id: z.uuid() });

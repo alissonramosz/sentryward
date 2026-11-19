@@ -38,19 +38,33 @@ async function suggestionCounts(workspaceId: string) {
   return { pending: count("pending"), approved: count("approved"), discarded: count("discarded") };
 }
 
+// Newest first, a page at a time. Keyset rather than Prisma's `cursor`: that
+// looks the cursor row up again, and it may have been decided since. The page
+// is picked in SQL to compare created_at at full (microsecond) precision.
 export async function listRuleSuggestions(req: Request, res: Response) {
-  const { status } = listRuleSuggestionsQuerySchema.parse(req.query);
+  const { status, cursor } = listRuleSuggestionsQuerySchema.parse(req.query);
   const workspaceId = req.workspaceId!;
-  const [suggestions, counts] = await Promise.all([
-    prisma.ruleSuggestion.findMany({
-      where: { workspaceId, status },
-      select: suggestionSelect,
-      orderBy: { createdAt: "desc" },
-      take: LIST_LIMIT,
-    }),
+  const after = cursor
+    ? Prisma.sql`AND (created_at, id) < ('epoch'::timestamptz + ${cursor.atMicros}::bigint * interval '1 microsecond', ${cursor.id}::uuid)`
+    : Prisma.empty;
+  const [page, counts] = await Promise.all([
+    prisma.$queryRaw<{ id: string; at_micros: string }[]>`
+      SELECT id, (extract(epoch FROM created_at) * 1000000)::bigint::text AS at_micros
+      FROM rule_suggestions
+      WHERE workspace_id = ${workspaceId}::uuid AND status::text = ${status} ${after}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${LIST_LIMIT + 1}
+    `,
     suggestionCounts(workspaceId),
   ]);
-  res.json({ suggestions, counts });
+  const ids = page.slice(0, LIST_LIMIT).map((row) => row.id);
+  const rows = await prisma.ruleSuggestion.findMany({ where: { id: { in: ids } }, select: suggestionSelect });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  // A row deleted between the two reads is simply left out.
+  const suggestions = ids.flatMap((id) => byId.get(id) ?? []);
+  const last = page[LIST_LIMIT - 1];
+  const nextCursor = page.length > LIST_LIMIT && last ? `${last.at_micros}_${last.id}` : null;
+  res.json({ suggestions, counts, nextCursor });
 }
 
 // Counts alone, for the nav badge on every page: the list carries each

@@ -289,12 +289,18 @@ export async function pruneBacklog(
 // evidence, but its excerpts (people's words) go once what they quote is past
 // the same cutoff, whatever the suggestion's status: privacy outranks an admin
 // still deciding.
+// Comments created, and excerpts quoting sources, before this are deleted.
+// Shared with the rule suggestion run, which must not cite anything past it.
+export function ruleHistoryCutoff(days: number | null, now: Date): Date {
+  const windowDays = HISTORY_MS / DAY_MS;
+  return new Date(now.getTime() - Math.min(days ?? windowDays, windowDays) * DAY_MS);
+}
+
 export async function pruneRuleHistory(
   days: number | null,
   { now = new Date(), batchSize = 1000, workspaceIds }: PruneOptions = {},
 ): Promise<{ comments: number; excerpts: number }> {
-  const windowDays = HISTORY_MS / DAY_MS;
-  const cutoff = new Date(now.getTime() - Math.min(days ?? windowDays, windowDays) * DAY_MS);
+  const cutoff = ruleHistoryCutoff(days, now);
   const where: Prisma.ReviewCommentWhereInput = {
     createdAt: { lt: cutoff },
     ...(workspaceIds ? { repository: { connection: { workspaceId: { in: workspaceIds } } } } : {}),

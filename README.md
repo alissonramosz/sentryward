@@ -2157,7 +2157,7 @@ Workspace owners and admins only. See [Rule suggestions](#rule-suggestions).
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| GET    | `/api/rule-suggestions?status=` | `pending` (default), `approved` or `discarded` suggestions, newest first (up to 100), plus `counts` per status |
+| GET    | `/api/rule-suggestions?status=&cursor=` | `pending` (default), `approved` or `discarded` suggestions, newest first, 100 per page, plus `counts` per status and `nextCursor` (pass it as `cursor` for the next page; null on the last) |
 | GET    | `/api/rule-suggestions/counts` | `{ counts }` per status alone, for the nav badge |
 | GET    | `/api/rule-suggestions/settings` | `{ enabled, minEvidence, excludedReviewers, lastRunAt, storedComments }` |
 | PUT    | `/api/rule-suggestions/settings` | `{ enabled, minEvidence (2-50), excludedReviewers }`. Turning it off deletes the stored review comments and the comment excerpts of suggestions; excluding a reviewer deletes theirs and the comment excerpts of suggestions that cited them |

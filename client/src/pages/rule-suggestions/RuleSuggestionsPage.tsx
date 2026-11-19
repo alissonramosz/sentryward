@@ -39,7 +39,9 @@ export function RuleSuggestionsPage() {
   const list = useRuleSuggestions(status, { enabled: canManage })
   const settings = useRuleSuggestionSettings({ enabled: canManage })
   const repos = useRepos()
-  const counts = list.data?.counts
+  const suggestions = list.data?.pages.flatMap((page) => page.suggestions) ?? []
+  // From the first page: refetched first, so it is as fresh as any.
+  const counts = list.data?.pages[0]?.counts
   const enabled = settings.data?.enabled
   // Until toggled by hand, settings start open only while the feature is off,
   // so first-time setup is in view and a configured page leads with the list.
@@ -97,7 +99,7 @@ export function RuleSuggestionsPage() {
             Retry
           </Button>
         </div>
-      ) : list.data.suggestions.length === 0 ? (
+      ) : suggestions.length === 0 ? (
         <Empty className="border border-dashed">
           <EmptyHeader>
             <EmptyMedia variant="icon">
@@ -120,9 +122,20 @@ export function RuleSuggestionsPage() {
         </Empty>
       ) : (
         <div className="flex flex-col gap-4">
-          {list.data.suggestions.map((suggestion) => (
+          {suggestions.map((suggestion) => (
             <SuggestionCard key={suggestion.id} suggestion={suggestion} repos={repos.data?.repos ?? []} />
           ))}
+          {list.hasNextPage && (
+            <Button
+              type="button"
+              variant="outline"
+              className="self-center"
+              disabled={list.isFetchingNextPage}
+              onClick={() => list.fetchNextPage()}
+            >
+              {list.isFetchingNextPage ? "Loading..." : "Load more"}
+            </Button>
+          )}
         </div>
       )}
     </PageShell>

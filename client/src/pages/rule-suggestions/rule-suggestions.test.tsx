@@ -32,7 +32,11 @@ const suggestion: RuleSuggestion = {
   repository: null,
 }
 
-const list = (suggestions: RuleSuggestion[]) => ({ suggestions, counts: { pending: suggestions.length, approved: 0, discarded: 0 } })
+const list = (suggestions: RuleSuggestion[], nextCursor: string | null = null) => ({
+  suggestions,
+  counts: { pending: suggestions.length, approved: 0, discarded: 0 },
+  nextCursor,
+})
 const PENDING = "GET /api/rule-suggestions?status=pending"
 const base = {
   "GET /api/rule-suggestions/counts": { counts: { pending: 0, approved: 0, discarded: 0 } },
@@ -55,6 +59,23 @@ describe("Rule suggestions page", () => {
     expect(screen.queryByText("Move this query out")).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Based on 2 comments across 2 changes" }))
     expect(screen.getByText("Move this query out")).toBeInTheDocument()
+  })
+
+  it("loads older suggestions a page at a time", async () => {
+    const older = { ...suggestion, id: "s-2", rule: { ...suggestion.rule, id: "no-raw-sql" } }
+    mockApi({
+      ...base,
+      [PENDING]: list([suggestion], "1700000000000000_s-1"),
+      [`${PENDING}&cursor=1700000000000000_s-1`]: list([older]),
+    })
+    renderWithProviders(<App />, { route: "/rule-suggestions" })
+
+    expect(await screen.findByText("db-in-repos")).toBeInTheDocument()
+    expect(screen.queryByText("no-raw-sql")).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Load more" }))
+    expect(await screen.findByText("no-raw-sql")).toBeInTheDocument()
+    expect(screen.getByText("db-in-repos")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument()
   })
 
   it("leads with the list and keeps settings folded while the feature is on", async () => {

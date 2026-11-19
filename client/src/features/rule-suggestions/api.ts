@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { Rule } from "@/features/config/api"
 import { api } from "@/lib/api"
 
@@ -41,6 +41,8 @@ export interface RuleSuggestion {
 export interface SuggestionList {
   suggestions: RuleSuggestion[]
   counts: Record<SuggestionStatus, number>
+  // Passed back as `cursor` for the next page; null on the last.
+  nextCursor: string | null
 }
 
 export interface SuggestionSettings {
@@ -58,10 +60,14 @@ export type ApproveTarget = "global" | { repositoryId: string }
 const KEY = ["rule-suggestions"]
 const SETTINGS_KEY = ["rule-suggestions", "settings"]
 
+// Newest first, a page at a time; invalidating KEY refetches every loaded page.
 export function useRuleSuggestions(status: SuggestionStatus, options: { enabled?: boolean } = {}) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: [...KEY, "list", status],
-    queryFn: () => api<SuggestionList>(`/rule-suggestions?status=${status}`),
+    queryFn: ({ pageParam }) =>
+      api<SuggestionList>(`/rule-suggestions?status=${status}${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
     enabled: options.enabled ?? true,
   })
 }

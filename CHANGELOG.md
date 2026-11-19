@@ -44,7 +44,13 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   workspace lock, so turning the feature off or excluding a reviewer while the
   model is answering never brings back deleted comments: a run turned off
   mid-call saves nothing, and a suggestion citing a comment deleted meanwhile
-  is dropped. Worker shutdown waits for a running suggestion pass before
+  is dropped. Before saving, a run also locks every comment and dismissal it
+  cites, so retention cannot delete one until the suggestion is stored, and
+  drops any suggestion whose evidence is gone, no longer dismissed, or already
+  past the workspace's retention cutoff, so no excerpt outlives what it quotes.
+  The list (`GET /api/rule-suggestions`) is paged, 100 at a time, newest
+  first: pass the returned `nextCursor` as `?cursor=` for the next page, and
+  the page offers **Load more**. Worker shutdown waits for a running suggestion pass before
   disconnecting from the database.
   Removing a repository deletes its pending suggestions. The page leads with the suggestions: settings fold into a header showing
   whether learning is on, the last check and **Check now** (open by default only

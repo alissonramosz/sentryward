@@ -570,6 +570,72 @@ describe("worker run", () => {
     expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
     expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
+
+  // Runs `during` while the model is answering, as retention might.
+  function deletingMidCall(evidenceIds: string[], during: () => Promise<unknown>, extra: Partial<RuleSuggestionDeps> = {}) {
+    const { model, runDeps } = deps(draft(evidenceIds), extra);
+    const generate: typeof model.generate = async (req) => {
+      await during();
+      return model.generate(req);
+    };
+    return { ...runDeps, generateFor: () => generate };
+  }
+
+  async function dismissals(repoId: string, count: number) {
+    for (let number = 1; number <= count; number++) {
+      const finding = await trackFinding(repoId, number);
+      await prisma.finding.update({
+        where: { id: finding.id },
+        data: { state: "ignored", ignoreReason: "false_positive", ignoreNote: "We allow raw SQL in billing handlers.", ignoredAt: new Date() },
+      });
+    }
+  }
+
+  it("drops a suggestion citing a dismissal deleted during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await dismissals(repo.id, 3);
+
+    const runDeps = deletingMidCall(["d1", "d2", "d3"], () => prisma.finding.deleteMany({ where: { number: 2 } }));
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
+  it("drops a suggestion citing a dismissal undone during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await dismissals(repo.id, 3);
+
+    const reopen = () =>
+      prisma.finding.updateMany({ where: { number: 1 }, data: { state: "open", ignoreReason: null, ignoreNote: null, ignoredAt: null } });
+    expect(await runNextRuleSuggestions(new Date(), deletingMidCall(["d1", "d2", "d3"], reopen))).toMatchObject({ created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
+  it("drops a suggestion citing a comment deleted during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+
+    // Three of the five, so at least one of the three cited.
+    const runDeps = deletingMidCall(["c1", "c2", "c3"], () => prisma.reviewComment.deleteMany({ where: { number: { lte: 3 } } }));
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
+  it("drops a suggestion citing evidence past the workspace's retention period", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    // Within the 90-day window the run reads, but past a 30-day privacy period.
+    await prisma.reviewComment.updateMany({ data: { createdAt: new Date(Date.now() - 40 * 86_400_000) } });
+    const thirtyDays = async () =>
+      mergePolicy({ ...OPEN_LAYER, auditRetentionDays: null, retentionSource: null }, { ...OPEN_LAYER, retentionDays: 30 });
+
+    const runDeps = deletingMidCall(["c1", "c2", "c3"], async () => undefined, { policyFor: thirtyDays });
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
 });
 
 describe("rule suggestions API", () => {
@@ -601,6 +667,43 @@ describe("rule suggestions API", () => {
     expect(res.status).toBe(200);
     expect(res.body.counts).toEqual({ pending: 1, approved: 0, discarded: 0 });
     expect(res.body.suggestions[0].rule).toEqual(RULE);
+    expect(res.body.nextCursor).toBeNull();
+  });
+
+  it("pages through more suggestions than fit in one list", async () => {
+    // Same created_at for all: the id breaks the tie, so no row is skipped or repeated.
+    const createdAt = new Date();
+    await prisma.ruleSuggestion.createMany({
+      data: Array.from({ length: 102 }, () => ({
+        workspaceId,
+        rule: RULE,
+        rationale: "Asked often.",
+        evidence: { findingIds: [], commentIds: [], changes: 3, excerpts: [] },
+        model: "anthropic/claude-sonnet-5-5",
+        createdAt,
+      })),
+    });
+
+    const first = await request(app).get("/api/rule-suggestions").set("Cookie", cookie);
+    expect(first.body.suggestions).toHaveLength(100);
+    expect(first.body.nextCursor).toEqual(expect.any(String));
+    // The cursor's own row may be decided meanwhile; the next page still follows it.
+    const lastId = first.body.suggestions[99].id;
+    await request(app).post(`/api/rule-suggestions/${lastId}/discard`).set("Cookie", cookie).expect(200);
+
+    const second = await request(app)
+      .get(`/api/rule-suggestions?cursor=${encodeURIComponent(first.body.nextCursor)}`)
+      .set("Cookie", cookie);
+    expect(second.status).toBe(200);
+    expect(second.body.suggestions).toHaveLength(2);
+    expect(second.body.nextCursor).toBeNull();
+    const ids = new Set([...first.body.suggestions, ...second.body.suggestions].map((row: { id: string }) => row.id));
+    expect(ids.size).toBe(102);
+  });
+
+  it("refuses a malformed cursor", async () => {
+    const res = await request(app).get("/api/rule-suggestions?cursor=nope").set("Cookie", cookie);
+    expect(res.status).toBe(400);
   });
 
   it("counts suggestions without listing them", async () => {

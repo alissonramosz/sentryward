@@ -10,6 +10,7 @@ import { llmCredentialsFor } from "../services/llm.ts";
 import { auditedGenerate } from "../services/llmAudit.ts";
 import { guardModels, policyFor, type EffectivePolicy } from "../services/privacyPolicy.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
+import { ruleHistoryCutoff } from "./retention.ts";
 
 // Drafts team rules from a workspace's review history (review/learn/suggest.ts)
 // for an admin to approve. Opt-in per workspace, at most once a week each:
@@ -222,7 +223,8 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
   const config = resolveDashboardLayers({ globalSettings: workspace.reviewSettings, followGlobal: true }).config;
   const model = modelChain(config.llm, "review")[0]!;
   const llm = resolveLlm(config, [model], await deps.credentialsFor(workspaceId));
-  const guard = await guardModels(await deps.policyFor(workspaceId), [model, ...llm.fallbackModels], llm.endpoint, llm.baseUrls, deps.resolveHost);
+  const policy = await deps.policyFor(workspaceId);
+  const guard = await guardModels(policy, [model, ...llm.fallbackModels], llm.endpoint, llm.baseUrls, deps.resolveHost);
   const refused = guard.rejected.get(model);
   if (refused) {
     console.log("[worker] rule suggestions for workspace %s blocked by its privacy policy: %s", workspaceId, refused.message);
@@ -253,16 +255,35 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
       SELECT rule_suggestions_enabled AS enabled FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
     `;
     if (!current?.enabled) return null;
-    // An excluded reviewer's comments are deleted when the exclusion is saved,
-    // so a comment that still exists may still be quoted. A suggestion citing
-    // one that is gone is dropped whole: its evidence no longer stands.
+    // Every cited comment and dismissal may have gone during the model call:
+    // an excluded reviewer's comments are deleted when the exclusion is saved,
+    // retention deletes comments and findings, and a dismissal can be undone.
+    // Lock the ones still standing (the level of the suggestion_id update
+    // below, which conflicts with a delete) so none goes before this commits,
+    // and only those retention would keep: anything past its cutoff could be
+    // deleted the moment the lock is released, leaving an excerpt behind. A
+    // suggestion missing any of its evidence is dropped whole.
+    const cutoff = ruleHistoryCutoff(policy.retentionDays, new Date());
     const commentIds = suggestions.flatMap((s) => s.evidence.filter((item) => item.kind === "comment").map((item) => item.id));
-    const remaining = new Set(
-      commentIds.length
-        ? (await tx.reviewComment.findMany({ where: { id: { in: commentIds } }, select: { id: true } })).map((row) => row.id)
-        : [],
-    );
-    const kept = suggestions.filter((s) => s.evidence.every((item) => item.kind !== "comment" || remaining.has(item.id)));
+    const findingIds = suggestions.flatMap((s) => s.evidence.filter((item) => item.kind === "dismissal").map((item) => item.id));
+    const lockedComments = commentIds.length
+      ? await tx.$queryRaw<{ id: string }[]>`
+          SELECT id FROM review_comments
+          WHERE id = ANY(${commentIds}::uuid[]) AND suggestion_id IS NULL AND created_at >= ${cutoff}
+          ORDER BY id FOR NO KEY UPDATE
+        `
+      : [];
+    const lockedFindings = findingIds.length
+      ? await tx.$queryRaw<{ id: string }[]>`
+          SELECT id FROM findings
+          WHERE id = ANY(${findingIds}::uuid[]) AND suggestion_id IS NULL
+            AND state::text = 'ignored' AND ignore_reason::text = ANY(${LEARNED_REASONS}::text[])
+            AND ignored_at >= ${cutoff}
+          ORDER BY id FOR NO KEY UPDATE
+        `
+      : [];
+    const standing = new Set([...lockedComments, ...lockedFindings].map((row) => row.id));
+    const kept = suggestions.filter((s) => s.evidence.every((item) => standing.has(item.id)));
     for (const suggestion of kept) {
       const created = await tx.ruleSuggestion.create({
         data: {
