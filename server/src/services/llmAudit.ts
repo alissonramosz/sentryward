@@ -12,9 +12,10 @@ const PURPOSES: Record<string, string> = {
   verification: "verify",
   thread_answer: "reply",
   connection_test: "test",
+  rule_suggestions: "rule_suggest",
 };
 
-export type AuditPurpose = "review" | "walkthrough" | "verify" | "probe" | "reply" | "test";
+export type AuditPurpose = "review" | "walkthrough" | "verify" | "probe" | "reply" | "rule_suggest" | "test";
 
 // Who and what a request was made for. Repository and workspace names are
 // snapshots, so the log still reads once those are gone.

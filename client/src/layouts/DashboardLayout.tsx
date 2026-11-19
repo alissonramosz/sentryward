@@ -12,6 +12,7 @@ import {
   GitPullRequest,
   House,
   KeyRound,
+  Lightbulb,
   LogOut,
   Search,
   Settings,
@@ -60,7 +61,8 @@ import { isMac } from "@/lib/platform"
 import { CommandPalette } from "./CommandPalette"
 import { useNavAttention, type NavAttention } from "./useNavAttention"
 
-export type NavItem = { to: string; label: string; icon: typeof House }
+// workspaceAdmin: shown only to the current workspace's owners and admins.
+export type NavItem = { to: string; label: string; icon: typeof House; workspaceAdmin?: boolean }
 export type NavGroup = { label?: string; adminOnly?: boolean; items: NavItem[] }
 
 // Grouped by what you come to do: follow reviews, read the numbers, set the
@@ -90,6 +92,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: "/repositories", label: "Repositories", icon: FolderGit2 },
       { to: "/llm-connections", label: "LLM Connections", icon: KeyRound },
       { to: "/configuration", label: "Review settings", icon: SlidersHorizontal },
+      { to: "/rule-suggestions", label: "Rule suggestions", icon: Lightbulb, workspaceAdmin: true },
       { to: "/notifications", label: "Notifications", icon: Bell },
       { to: "/privacy", label: "Privacy", icon: ShieldCheck },
     ],
@@ -208,7 +211,11 @@ export function DashboardLayout() {
   if (!user) {
     return null
   }
-  const groups = NAV_GROUPS.filter((group) => !group.adminOnly || user.role === "admin")
+  const workspaceAdmin = workspace?.role === "owner" || workspace?.role === "admin"
+  const groups = NAV_GROUPS.filter((group) => !group.adminOnly || user.role === "admin").map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.workspaceAdmin || workspaceAdmin),
+  }))
 
   return (
     // Here rather than on a page, so a manual review can be started from anywhere.

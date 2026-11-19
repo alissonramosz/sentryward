@@ -102,7 +102,7 @@ function claimRule(config: Config): string {
 `;
 }
 
-function untrusted(text: string, limit: number): string {
+export function untrusted(text: string, limit: number): string {
   const trimmed = text.length > limit ? `${text.slice(0, limit)}\n[truncated]` : text;
   return `<untrusted>\n${trimmed.replaceAll("</untrusted>", "</ untrusted>")}\n</untrusted>`;
 }

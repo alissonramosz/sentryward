@@ -64,6 +64,7 @@ statuses. The dashboard tracks reviews and findings across runs.
   [Ollama](#ollama) ·
   [`.sentryward.yaml`](#sentrywardyaml-reference) ·
   [review rules](#review-rules) ·
+  [rule suggestions](#rule-suggestions) ·
   [static analysis findings](#static-analysis-findings)
 - **[Privacy and data](#privacy-and-data):**
   [what is stored](#what-is-stored) ·
@@ -1707,6 +1708,42 @@ browser accepts lookarounds and backreferences that RE2 rejects. Dashboard rules
 are not visible in the repository, so the inline comment for a rule finding
 includes the rule's description and paths in a collapsed **📏 Rule** block.
 
+### Rule suggestions
+
+Sentryward can draft rules from what your reviewers keep asking for. Owners and
+admins turn it on under **Workspace → Rule suggestions**; it is off by default.
+
+- **What it reads:** comments people with push access leave on changed lines
+  (GitHub review comments, GitLab diff notes, received through the webhooks
+  Sentryward already uses), and findings dismissed as a false positive or
+  intentional, with their notes. Comments from bots, `/sentryward` commands,
+  replies in Sentryward's own threads, very short remarks and reviewers on the
+  **Reviewers not to learn from** list are not kept. Comments are stored only
+  while the feature is on.
+- **When:** once a week per workspace (or after **Check now**, at most once an
+  hour). History from the last 90 days is grouped by repository folder and by
+  recurring dismissed finding; only groups with at least the **minimum
+  evidence** (default 5) across two or more changes are sent, so a quiet week
+  makes no model call. Otherwise it is one call to the workspace's review
+  model, under its privacy restrictions, recorded in the audit log as
+  `rule_suggest`. Like thread replies, it is not counted in Usage or the
+  monthly budget, which sum review runs.
+- **What comes back:** at most five rules, each citing the comments and
+  dismissals behind it. A draft whose rule is invalid (including a pattern RE2
+  rejects), whose id is already used in the workspace or by a pending
+  suggestion, or that cites too little evidence is dropped. Each comment or
+  dismissal backs one suggestion at most, so the same history does not
+  suggest the same rule twice.
+- **Approving:** nothing changes until an owner or admin approves. The rule can
+  be edited first and goes to the workspace's global settings or to one
+  repository's own settings (suggested from where the evidence came from),
+  through the same checks as saving those settings by hand. A repository that
+  follows the global config cannot take one. Discarded suggestions are shown to
+  later runs as rules not to propose again.
+
+Dismissals only help when their note states a convention: a rule adds a check,
+it cannot silence a finding.
+
 ### Static analysis findings
 
 Sentryward does not run analyzers itself. With `review.tool_findings` on (the
@@ -1764,6 +1801,13 @@ that limit both.
   where, so a later run does not repost them.
 - **Thread replies** (`thread_replies`): replies and `/sentryward` commands left
   on Sentryward's inline threads, including the commenter's text.
+- **Review comments** (`review_comments`): only while [rule
+  suggestions](#rule-suggestions) are on, people's comments on changed lines
+  with their login, file and line. Deleted after 90 days (sooner under a
+  shorter retention period), and all at once when the feature is turned off.
+- **Rule suggestions** (`rule_suggestions`): drafted rules and excerpts of the
+  comments and dismissals behind them. Retention clears the excerpts with the
+  rest; the rule and evidence counts stay.
 - **Credentials**: forge tokens, GitHub App installations, LLM API keys and
   notification URLs, encrypted with `ENCRYPTION_KEY` (AES-256-GCM). Only the
   last four characters of a key are ever shown.
@@ -1892,8 +1936,8 @@ How the policy is enforced:
 
 Every request sent to a model is recorded: time, workspace, repository and
 change, purpose (review, walkthrough, verify, capability probe, thread reply,
-connection test), provider, host, model, input/cached/output/reasoning tokens,
-latency and outcome. A failed request records only a short error kind (such as
+rule suggestions, connection test), provider, host, model,
+input/cached/output/reasoning tokens, latency and outcome. A failed request records only a short error kind (such as
 `http_429` or `unusable_reply`), never the error text, and prompts, code and
 replies are never recorded. Entries keep the workspace and repository names
 after those are deleted, until audit retention removes them.
@@ -2098,6 +2142,22 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/backlog/stats?repoId=` | Open items: `{ open, bySeverity, byAge }`, with age buckets `week`, `month`, `quarter` and `older` by when the finding was first raised |
 | GET    | `/api/backlog/:id` | One item, plus `sourceReviewId` (the latest stored review of the change it shipped in, or `null`) |
 | PATCH  | `/api/backlog/:id` | `{ "state": "dismissed", "note"? }` or `{ "state": "open" }`. `resolved` is only set by a merge |
+
+</details>
+
+<details>
+<summary>Rule suggestions</summary>
+
+Workspace owners and admins only. See [Rule suggestions](#rule-suggestions).
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET    | `/api/rule-suggestions?status=` | `pending` (default), `approved` or `discarded` suggestions, newest first (up to 100), plus `counts` per status |
+| GET    | `/api/rule-suggestions/settings` | `{ enabled, minEvidence, excludedReviewers, lastRunAt, storedComments }` |
+| PUT    | `/api/rule-suggestions/settings` | `{ enabled, minEvidence (2-50), excludedReviewers }`. Turning it off deletes the stored review comments; excluding a reviewer deletes theirs |
+| POST   | `/api/rule-suggestions/run` | Makes the workspace due, so the worker checks within about 10 minutes. 409 when off, 429 within an hour of the last run |
+| POST   | `/api/rule-suggestions/:id/approve` | `{ "rule", "target": "global" \| { "repositoryId" } }`. Adds the (possibly edited) rule to that layer; 400 for an id already there or a limit, 409 for a repository that follows the global config |
+| POST   | `/api/rule-suggestions/:id/discard` | Discards it; later runs are told not to propose it again |
 
 </details>
 

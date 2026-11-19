@@ -11,6 +11,7 @@ import { runRetention } from "./retention.ts";
 import { sweepClosedChanges } from "./backlogSweep.ts";
 import { applyPendingMerges } from "../services/backlog.ts";
 import { runBudgetAlertPage, sendAdminEmails } from "./budgetAlerts.ts";
+import { runNextRuleSuggestions } from "./ruleSuggestions.ts";
 
 let stopping = false;
 const running = new Set<Promise<void>>();
@@ -41,6 +42,12 @@ let lastApplyAt = 0;
 const BUDGET_INTERVAL_MS = 5 * 60 * 1000;
 let lastBudgetAt = 0;
 let budgetCursor: string | null = null;
+// Each workspace is due once a week (ruleSuggestions.ts); checking for a due
+// one costs a single indexed query. One run at a time, in the background: it
+// is a model call that can take a minute, and claims must not wait on it.
+const RULE_SUGGESTIONS_INTERVAL_MS = 10 * 60 * 1000;
+let lastSuggestAt = 0;
+let suggesting: Promise<void> | null = null;
 
 // Claims are awaited one at a time; the work itself runs in the background up
 // to WORKER_CONCURRENCY jobs. Replies to inline threads share the slots and
@@ -107,12 +114,16 @@ async function prune(): Promise<void> {
   // retrying every poll.
   lastPruneAt = Date.now();
   const r = await runRetention();
-  if (r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries || r.backlogItems || r.backlogScrubbed || r.budgetAlerts) {
+  if (
+    r.deleted || r.trimmed || r.changes || r.auditRows || r.deliveries || r.backlogItems || r.backlogScrubbed ||
+    r.budgetAlerts || r.reviewComments || r.suggestionExcerpts
+  ) {
     console.log(
       `[worker] retention: deleted ${r.deleted} job(s), expired ${r.trimmed} result(s), ` +
         `purged ${r.changes} change(s) (${r.findings} finding(s), ${r.replies} reply(ies)), ` +
         `${r.auditRows} audit row(s), ${r.deliveries} notification delivery(ies), ${r.backlogItems} backlog item(s), ` +
-        `scrubbed ${r.backlogScrubbed} dismissed backlog item(s), ${r.budgetAlerts} budget alert(s)`,
+        `scrubbed ${r.backlogScrubbed} dismissed backlog item(s), ${r.budgetAlerts} budget alert(s), ` +
+        `${r.reviewComments} review comment(s), trimmed evidence of ${r.suggestionExcerpts} rule suggestion(s)`,
     );
   }
 }
@@ -131,6 +142,27 @@ async function checkBudgets(): Promise<void> {
   const page = await runBudgetAlertPage(new Date(), after);
   budgetCursor = page.next;
   if (page.announced) console.log(`[worker] queued ${page.announced} budget alert(s)`);
+}
+
+// Starts a rule suggestion run for the next due workspace, if none is running.
+// Like prune, the time is set first so a failing claim waits for the next
+// interval. A run that found one keeps checking each poll until none is due,
+// so a backlog of opted-in workspaces drains one after another.
+function suggestRules(): void {
+  if (suggesting || stopping || Date.now() - lastSuggestAt < RULE_SUGGESTIONS_INTERVAL_MS) return;
+  lastSuggestAt = Date.now();
+  suggesting = runNextRuleSuggestions()
+    .then((r) => {
+      if (!r) return;
+      lastSuggestAt = 0;
+      if (r.outcome === "suggested") {
+        console.log(`[worker] rule suggestions: workspace ${r.workspaceId} got ${r.created} suggestion(s), ${r.dropped} draft(s) dropped`);
+      }
+    })
+    .catch((err) => console.error("[worker] rule suggestions failed", err))
+    .finally(() => {
+      suggesting = null;
+    });
 }
 
 // Applies recorded merges to the backlog (backlog.ts). Like prune, the time is
@@ -174,7 +206,7 @@ async function drain(): Promise<void> {
   const deadline = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), env.WORKER_SHUTDOWN_DRAIN_MS);
   });
-  const outcome = await Promise.race([Promise.allSettled([...running, ...deliveries]), deadline]);
+  const outcome = await Promise.race([Promise.allSettled([...running, ...deliveries, ...(suggesting ? [suggesting] : [])]), deadline]);
   clearTimeout(timer);
   if (outcome !== "timeout") return;
   if (inFlight.size === 0) {
@@ -249,6 +281,8 @@ async function loop(): Promise<void> {
     } catch (err) {
       console.error("[worker] retention failed", err);
     }
+    // Starts in the background and handles its own errors.
+    suggestRules();
     await new Promise((resolve) => setTimeout(resolve, env.WORKER_POLL_INTERVAL_MS));
   }
   await drain();

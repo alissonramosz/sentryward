@@ -6,6 +6,7 @@ import { gitlabConnectSchema } from "../../schemas/connections.schema.ts";
 import { gitlabAccessToken, gitlabOAuthConfigured } from "../gitlabOAuth.ts";
 import { cancelQueuedForClosedChange, enqueue, enqueueFromWebhook } from "../../worker/queue.ts";
 import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
+import { recordReviewComment } from "../reviewComments.ts";
 import { recordThreadReply } from "../threadReplies.ts";
 import type { ProviderDefinition } from "./types.ts";
 import { decryptToken } from "./token.ts";
@@ -26,6 +27,8 @@ interface GitLabPayload {
     // "DiffNote" for a note on a diff line, which is where inline threads live.
     type?: string | null;
     discussion_id?: string;
+    // DiffNotes only: where on the diff the note was left.
+    position?: { new_path?: string; old_path?: string; new_line?: number | null };
     last_commit?: { id: string };
     target_branch?: string;
   };
@@ -150,6 +153,22 @@ export const gitlabProvider: ProviderDefinition = {
       ) {
         const user = payload.user;
         const forge = adapterFor(repo.connection);
+        const allowed = async () => (await forge.memberAccessLevel(repo.externalId, user.id)) >= DEVELOPER;
+        // Rule suggestion evidence when the workspace learns rules. Every note
+        // of a discussion arrives with its id, so a discussion Sentryward opened
+        // is skipped there, as are its own notes by their markers.
+        await recordReviewComment({
+          repo,
+          number: payload.merge_request.iid,
+          commentId: String(attrs.id),
+          threadId: attrs.discussion_id,
+          author: user.username,
+          body: attrs.note ?? "",
+          file: attrs.position?.new_path ?? attrs.position?.old_path,
+          line: attrs.position?.new_line,
+          isSelf: false,
+          allowed,
+        });
         return recordThreadReply({
           repo,
           forge,
@@ -159,7 +178,7 @@ export const gitlabProvider: ProviderDefinition = {
           actor: user.username,
           body: attrs.note ?? "",
           botLogin: false,
-          allowed: async () => (await forge.memberAccessLevel(repo.externalId, user.id)) >= DEVELOPER,
+          allowed,
         });
       }
 

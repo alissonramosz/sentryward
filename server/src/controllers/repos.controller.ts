@@ -237,7 +237,7 @@ export async function updateRepo(req: Request, res: Response) {
 // a folder rule's id, or the combined limit), since the folder would otherwise
 // lose them with only a review warning. A folder that was already broken
 // before this save stays a warning, so it does not block unrelated edits.
-function requireRepoSettingsRules(
+export function requireRepoSettingsRules(
   globalSettings: unknown,
   saved: { settings: unknown; directories: unknown },
   settings: DashboardOverride,

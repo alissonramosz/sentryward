@@ -254,7 +254,7 @@ function parseNumber(spec: NumberSpec, text: string): number | null | undefined 
 
 const isBlankRule = (row: RuleRow) => Object.values(row).every((value) => !value.trim())
 
-function toRuleRow(rule: Rule): RuleRow {
+export function toRuleRow(rule: Rule): RuleRow {
   return {
     id: rule.id,
     description: rule.description,
@@ -270,7 +270,7 @@ function toRuleRow(rule: Rule): RuleRow {
 // Optional fields are left out when empty, as a hand-written file would.
 // Examples keep their indentation: they are code. A rule with a pattern is
 // never shown to the model, so its examples (hidden in the editor) are not kept.
-function toRule(row: RuleRow): Rule {
+export function toRule(row: RuleRow): Rule {
   const paths = pathList(row.paths)
   const rule: Rule = { id: row.id.trim(), description: row.description.trim(), severity: row.severity }
   if (row.category) rule.category = row.category

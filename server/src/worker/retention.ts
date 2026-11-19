@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.ts";
 import { Prisma } from "../generated/prisma/client.ts";
 import type { ReviewStatus } from "../generated/prisma/client.ts";
 import { instancePolicy, shorterRetention } from "../services/privacyPolicy.ts";
+import { HISTORY_MS } from "../review/learn/suggest.ts";
 
 // Runs that reviewed nothing: once past the window the whole row goes.
 const DELETED: ReviewStatus[] = ["superseded", "skipped", "cancelled"];
@@ -282,6 +283,40 @@ export async function pruneBacklog(
   return { deleted, scrubbed };
 }
 
+// Review comments are kept only as rule suggestion evidence, which looks back
+// HISTORY_MS, so none outlive that whatever the privacy period; a shorter
+// period deletes them sooner. Suggestions keep ids and counts of their
+// evidence, but its excerpts (people's words) go with the comments.
+export async function pruneRuleHistory(
+  days: number | null,
+  { now = new Date(), batchSize = 1000, workspaceIds }: PruneOptions = {},
+): Promise<{ comments: number; excerpts: number }> {
+  const windowDays = HISTORY_MS / DAY_MS;
+  const cutoff = new Date(now.getTime() - Math.min(days ?? windowDays, windowDays) * DAY_MS);
+  const where: Prisma.ReviewCommentWhereInput = {
+    createdAt: { lt: cutoff },
+    ...(workspaceIds ? { repository: { connection: { workspaceId: { in: workspaceIds } } } } : {}),
+  };
+  let comments = 0;
+  for (;;) {
+    const rows = await prisma.reviewComment.findMany({ where, select: { id: true }, take: batchSize });
+    if (rows.length) {
+      comments += (await prisma.reviewComment.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } })).count;
+    }
+    if (rows.length < batchSize) break;
+  }
+  if (days === null) return { comments, excerpts: 0 };
+  const excerptCutoff = new Date(now.getTime() - days * DAY_MS);
+  const scope = workspaceIds ? Prisma.sql`AND workspace_id = ANY(${workspaceIds}::uuid[])` : Prisma.empty;
+  const excerpts = await prisma.$executeRaw`
+    UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', '[]'::jsonb)
+    WHERE created_at < ${excerptCutoff}
+      AND jsonb_typeof(evidence->'excerpts') = 'array' AND jsonb_array_length(evidence->'excerpts') > 0
+      ${scope}
+  `;
+  return { comments, excerpts };
+}
+
 export interface RetentionResult extends PruneResult, PurgeResult {
   auditRows: number;
   oauthStates: number;
@@ -289,6 +324,8 @@ export interface RetentionResult extends PruneResult, PurgeResult {
   backlogItems: number;
   backlogScrubbed: number;
   budgetAlerts: number;
+  reviewComments: number;
+  suggestionExcerpts: number;
 }
 
 // The delivery log answers "is this target working", so recent rows are all it
@@ -359,9 +396,15 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     select: { id: true, privacy: { select: { retentionDays: true } } },
   });
   const byDays = new Map<number, string[]>();
+  // Workspaces with no privacy period still lose review comments past the
+  // suggestion window.
+  const unlimited: string[] = [];
   for (const workspace of workspaces) {
     const days = shorterRetention(instance.retentionDays, workspace.privacy?.retentionDays ?? null);
-    if (days === null) continue;
+    if (days === null) {
+      unlimited.push(workspace.id);
+      continue;
+    }
     byDays.set(days, [...(byDays.get(days) ?? []), workspace.id]);
   }
 
@@ -378,6 +421,8 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     backlogItems: 0,
     backlogScrubbed: 0,
     budgetAlerts: 0,
+    reviewComments: 0,
+    suggestionExcerpts: 0,
   };
   for (const [days, workspaceIds] of byDays) {
     const pruned = await pruneReviews(days, { now, workspaceIds });
@@ -394,6 +439,12 @@ export async function runRetention({ now = new Date() }: { now?: Date } = {}): P
     if (days < DELIVERY_RETENTION_DAYS) {
       result.deliveries += await pruneDeliveries(days, { now, workspaceIds });
     }
+    const history = await pruneRuleHistory(days, { now, workspaceIds });
+    result.reviewComments += history.comments;
+    result.suggestionExcerpts += history.excerpts;
+  }
+  if (unlimited.length) {
+    result.reviewComments += (await pruneRuleHistory(null, { now, workspaceIds: unlimited })).comments;
   }
 
   if (instance.auditRetentionDays !== null) {

@@ -17,6 +17,7 @@ import {
 } from "../../worker/queue.ts";
 import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
 import { getGitHubApp, githubConfigured } from "../githubApp.ts";
+import { recordReviewComment } from "../reviewComments.ts";
 import { recordThreadReply } from "../threadReplies.ts";
 import type { HeaderReader, ProviderDefinition, RepoWithConnection, WebhookOutcome } from "./types.ts";
 import { decryptToken } from "./token.ts";
@@ -58,9 +59,14 @@ export interface GitHubPayload {
     id?: number;
     body: string;
     author_association: string;
-    user?: { login: string };
+    // type is "Bot" for apps, Sentryward's own included.
+    user?: { login: string; type?: string };
     // Review comments only: the thread's root comment, set on every reply.
     in_reply_to_id?: number;
+    // Review comments only: the file and the line on the new side (null when
+    // the comment is on a removed line or the line no longer exists).
+    path?: string;
+    line?: number | null;
   };
   sender?: { login: string };
 }
@@ -118,14 +124,16 @@ function isReviewCommand(event: string | undefined, payload: GitHubPayload): boo
   );
 }
 
-// A reply in an inline thread. Whether the thread is Sentryward's is only known
-// once its root comment is read.
-function isThreadReply(event: string | undefined, payload: GitHubPayload): boolean {
+// A new comment on a diff line: rule suggestion evidence when its workspace
+// learns rules (reviewComments.ts), and, when it has in_reply_to_id, a reply
+// in an inline thread. Whether that thread is Sentryward's is only known once
+// its root comment is read.
+function isDiffComment(event: string | undefined, payload: GitHubPayload): boolean {
   return (
     event === "pull_request_review_comment" &&
     payload.action === "created" &&
     Boolean(payload.pull_request) &&
-    Boolean(payload.comment?.id && payload.comment.in_reply_to_id)
+    Boolean(payload.comment?.id)
   );
 }
 
@@ -139,7 +147,8 @@ export function isGithubReviewEvent(event: string | undefined, payload: GitHubPa
     isPullRequestPush(event, payload) ||
     isPullRequestClose(event, payload) ||
     isReviewCommand(event, payload) ||
-    isThreadReply(event, payload)
+    // Covers thread replies too.
+    isDiffComment(event, payload)
   );
 }
 
@@ -186,8 +195,21 @@ export async function handleGithubEvent(
     return { body: result.queued ? { outcome: "queued", reviewId: result.job.id } : { outcome: result.reason } };
   }
 
-  if (isThreadReply(event, payload)) {
+  if (isDiffComment(event, payload)) {
     const comment = payload.comment!;
+    const stored = await recordReviewComment({
+      repo,
+      number: payload.pull_request!.number,
+      commentId: String(comment.id),
+      threadId: comment.in_reply_to_id ? String(comment.in_reply_to_id) : undefined,
+      author: comment.user?.login,
+      body: comment.body ?? "",
+      file: comment.path,
+      line: comment.line,
+      isSelf: comment.user?.type === "Bot",
+      allowed: async () => TRUSTED.has(comment.author_association),
+    });
+    if (!comment.in_reply_to_id) return { body: { outcome: stored === "stored" ? "recorded" : "ignored" } };
     return recordThreadReply({
       repo,
       forge: adapterFor(repo.connection),
