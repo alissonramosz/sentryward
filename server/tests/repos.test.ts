@@ -2,6 +2,7 @@ import request from "supertest";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "../src/app.ts";
 import { decrypt, encrypt } from "../src/lib/crypto.ts";
+import { settingsRevision } from "../src/lib/settingsRevision.ts";
 import { prisma } from "../src/lib/prisma.ts";
 import { ensureWebhook, webhookUrl } from "../src/services/webhooks.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
@@ -9,6 +10,18 @@ import { addMember, createTeam, createUser, inWorkspace } from "./helpers/users.
 
 let cookie: string;
 let connectionId: string;
+
+// Settings saves must send the revision they were read at. Tests that are not
+// about concurrent saves read the current one just before saving.
+async function globalRevision(): Promise<string> {
+  const res = await request(app).get("/api/config/global").set("Cookie", cookie);
+  return res.body.revision;
+}
+
+async function repoRevision(id: string): Promise<string> {
+  const repo = await prisma.repository.findUniqueOrThrow({ where: { id }, select: { settings: true } });
+  return settingsRevision(repo.settings);
+}
 
 const project = (id: number, path: string) => ({
   id,
@@ -296,12 +309,12 @@ describe("POST /api/repos and PATCH /api/repos/:id", () => {
     const saved = await request(app)
       .patch(`/api/repos/${repo.id}`)
       .set("Cookie", cookie)
-      .send({ settings: { profile: "strict", review: { maxFindings: 10 } } });
+      .send({ settings: { profile: "strict", review: { maxFindings: 10 } }, settingsRevision: await repoRevision(repo.id) });
     expect(saved.status).toBe(200);
     expect(saved.body.repo.settings).toEqual({ profile: "strict", review: { maxFindings: 10 } });
     expect(saved.body.repo.enabled).toBe(false);
 
-    const reset = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: {} });
+    const reset = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: {}, settingsRevision: await repoRevision(repo.id) });
     expect(reset.body.repo.settings).toEqual({});
   });
 
@@ -333,7 +346,7 @@ describe("POST /api/repos and PATCH /api/repos/:id", () => {
     const bad = await request(app)
       .patch(`/api/repos/${repo.id}`)
       .set("Cookie", cookie)
-      .send({ settings: { review: { blockOn: "blocker" }, llm: { apiBase: "https://evil" } } });
+      .send({ settings: { review: { blockOn: "blocker" }, llm: { apiBase: "https://evil" } }, settingsRevision: await repoRevision(repo.id) });
     expect(bad.status).toBe(400);
     expect(bad.body.errors.settings).toBeDefined();
 
@@ -371,7 +384,7 @@ describe("POST /api/repos and PATCH /api/repos/:id", () => {
     const elsewhere = await jobOf(other.id, 4, "queued");
 
     // Settings alone leave the jobs alone.
-    await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { profile: "strict" } });
+    await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { profile: "strict" }, settingsRevision: await repoRevision(repo.id) });
     expect(await prisma.reviewJob.count({ where: { status: "cancelled" } })).toBe(0);
 
     const res = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ enabled: false });
@@ -614,7 +627,7 @@ describe("GET and PUT /api/config/global", () => {
     const saved = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { profile: "strict", llm: { model: "openai/gpt-5", connection: "openai" } } });
+      .send({ settings: { profile: "strict", llm: { model: "openai/gpt-5", connection: "openai" } }, revision: await globalRevision() });
     expect(saved.status).toBe(200);
     expect(saved.body.settings).toEqual({
       profile: "strict",
@@ -626,7 +639,7 @@ describe("GET and PUT /api/config/global", () => {
     const reset = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { llm: { connection: "openai" } } });
+      .send({ settings: { llm: { connection: "openai" } }, revision: await globalRevision() });
     expect(reset.body.settings).toEqual({ llm: { connection: "openai" } });
   });
 
@@ -649,14 +662,20 @@ describe("GET and PUT /api/config/global", () => {
     const workspace = await prisma.workspace.findFirstOrThrow({ where: { connections: { some: { id: connectionId } } } });
     expect(workspace.reviewSettings).toEqual({ llm: { connection: "openai" }, profile: "strict" });
 
-    // Stable across reads, and optional for API callers.
+    // Stable across reads, and required: a save without one could replace a
+    // rule approved since the caller read the settings.
     const again = await request(app).get("/api/config/global").set("Cookie", cookie);
     expect(again.body.revision).toBe(first.body.revision);
     const unchecked = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
       .send({ settings: { llm: { connection: "openai" } } });
-    expect(unchecked.status).toBe(200);
+    expect(unchecked.status).toBe(400);
+    expect(unchecked.body.errors.revision).toBeDefined();
+    expect((await prisma.workspace.findUniqueOrThrow({ where: { id: workspace.id } })).reviewSettings).toEqual({
+      llm: { connection: "openai" },
+      profile: "strict",
+    });
   });
 
   it("refuses a repository settings save made from settings that changed since they were read", async () => {
@@ -680,13 +699,21 @@ describe("GET and PUT /api/config/global", () => {
       .send({ settings: {}, settingsRevision: loaded });
     expect(stale.status).toBe(409);
     expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).settings).toEqual({ profile: "strict" });
+
+    // Required with settings, but not to turn the repository on or off.
+    const unchecked = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: {} });
+    expect(unchecked.status).toBe(400);
+    expect(unchecked.body.errors.settingsRevision).toBeDefined();
+    expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).settings).toEqual({ profile: "strict" });
+    const toggled = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ followGlobal: true });
+    expect(toggled.status).toBe(200);
   });
 
   it("rejects invalid settings", async () => {
     const res = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { llm: { apiBase: "https://evil" } } });
+      .send({ settings: { llm: { apiBase: "https://evil" } }, revision: await globalRevision() });
 
     expect(res.status).toBe(400);
     expect(res.body.errors.settings).toBeDefined();
@@ -697,7 +724,7 @@ describe("GET and PUT /api/config/global", () => {
     const global = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { llm: { connection: "openai" }, rules } });
+      .send({ settings: { llm: { connection: "openai" }, rules }, revision: await globalRevision() });
     expect(global.status).toBe(200);
     expect(global.body.settings.rules).toEqual(rules);
     expect(global.body.config.rules).toEqual(rules);
@@ -709,7 +736,7 @@ describe("GET and PUT /api/config/global", () => {
     const lookahead = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { llm: { connection: "openai" }, rules: [{ ...rules[0], pattern: "b(?=c)" }] } });
+      .send({ settings: { llm: { connection: "openai" }, rules: [{ ...rules[0], pattern: "b(?=c)" }] }, revision: await globalRevision() });
     expect(lookahead.status).toBe(400);
     expect(JSON.stringify(lookahead.body.errors.settings)).toMatch(/lookarounds/);
 
@@ -717,12 +744,12 @@ describe("GET and PUT /api/config/global", () => {
       data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/rules", externalId: "9", defaultBranch: "main" },
     });
     const own = [{ id: "no-c", description: "No c.", severity: "minor" }];
-    const saved = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: own } });
+    const saved = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: own }, settingsRevision: await repoRevision(repo.id) });
     expect(saved.status).toBe(200);
     const duplicate = await request(app)
       .patch(`/api/repos/${repo.id}`)
       .set("Cookie", cookie)
-      .send({ settings: { rules: [...own, ...own] } });
+      .send({ settings: { rules: [...own, ...own] }, settingsRevision: await repoRevision(repo.id) });
     expect(duplicate.status).toBe(400);
   });
 
@@ -732,17 +759,17 @@ describe("GET and PUT /api/config/global", () => {
     const global = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { llm: { connection: "openai" }, rules: many("global", 45) } });
+      .send({ settings: { llm: { connection: "openai" }, rules: many("global", 45) }, revision: await globalRevision() });
     expect(global.status).toBe(200);
 
     const repo = await prisma.repository.create({
       data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/limits", externalId: "10", defaultBranch: "main", followGlobal: false },
     });
-    const over = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: many("repo", 10) } });
+    const over = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: many("repo", 10) }, settingsRevision: await repoRevision(repo.id) });
     expect(over.status).toBe(400);
     expect(over.body.errors.rules[0]).toMatch(/^Rules in the repository settings were ignored: together with the rules below them, at most 50 rules/);
 
-    const clash = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: many("global", 1) } });
+    const clash = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: many("global", 1) }, settingsRevision: await repoRevision(repo.id) });
     expect(clash.status).toBe(400);
     expect(clash.body.errors.rules).toEqual([
       "Rule global-0 in the repository settings was ignored: a rule with that id is already set in the global config",
@@ -752,14 +779,14 @@ describe("GET and PUT /api/config/global", () => {
     const following = await request(app)
       .patch(`/api/repos/${repo.id}`)
       .set("Cookie", cookie)
-      .send({ settings: { rules: many("repo", 10) }, followGlobal: true });
+      .send({ settings: { rules: many("repo", 10) }, followGlobal: true, settingsRevision: await repoRevision(repo.id) });
     expect(following.status).toBe(200);
     await prisma.repository.update({ where: { id: repo.id }, data: { followGlobal: false } });
 
     const grown = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { llm: { connection: "openai" }, rules: many("global", 45) } });
+      .send({ settings: { llm: { connection: "openai" }, rules: many("global", 45) }, revision: await globalRevision() });
     expect(grown.status).toBe(200);
     expect(grown.body.warnings).toEqual([expect.stringMatching(/^team\/limits: Rules in the repository settings were ignored/)]);
   });
@@ -768,14 +795,14 @@ describe("GET and PUT /api/config/global", () => {
     const missing = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { profile: "fast" } });
+      .send({ settings: { profile: "fast" }, revision: await globalRevision() });
     expect(missing.status).toBe(400);
     expect(missing.body.errors.connection).toEqual(["Select an LLM connection"]);
 
     const unsaved = await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { llm: { connection: "anthropic" } } });
+      .send({ settings: { llm: { connection: "anthropic" } }, revision: await globalRevision() });
     expect(unsaved.status).toBe(400);
     expect(unsaved.body.errors.connection).toEqual([
       "Select a connection configured in Settings > API keys",
@@ -786,7 +813,7 @@ describe("GET and PUT /api/config/global", () => {
     await request(app)
       .put("/api/config/global")
       .set("Cookie", cookie)
-      .send({ settings: { profile: "fast", llm: { connection: "openai" } } });
+      .send({ settings: { profile: "fast", llm: { connection: "openai" } }, revision: await globalRevision() });
     const other = await createUser("other@example.com");
 
     const res = await request(app).get("/api/config/global").set("Cookie", other.cookie);
@@ -1137,7 +1164,7 @@ describe("folder settings", () => {
   it("refuses folder rules that clash, and unknown connections", async () => {
     const repo = await monorepo();
     await request(app).post(folders(repo.id)).set("Cookie", cookie).send({ path: "web" });
-    await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: [{ id: "own", description: "Own.", severity: "minor" }] } });
+    await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: { rules: [{ id: "own", description: "Own.", severity: "minor" }] }, settingsRevision: await repoRevision(repo.id) });
 
     const clash = await request(app)
       .put(folders(repo.id))
@@ -1165,7 +1192,7 @@ describe("folder settings", () => {
     const clash = await request(app)
       .patch(`/api/repos/${repo.id}`)
       .set("Cookie", cookie)
-      .send({ settings: { rules: [{ id: "web-rule", description: "Repo.", severity: "info" }] } });
+      .send({ settings: { rules: [{ id: "web-rule", description: "Repo.", severity: "info" }] }, settingsRevision: await repoRevision(repo.id) });
     expect(clash.status).toBe(400);
     expect(clash.body.errors.rules).toEqual([
       "web: Rule web-rule in the folder settings was ignored: a rule with that id is already set in the repository settings",
@@ -1181,7 +1208,7 @@ describe("folder settings", () => {
     const unrelated = await request(app)
       .patch(`/api/repos/${repo.id}`)
       .set("Cookie", cookie)
-      .send({ settings: { rules: [{ id: "web-rule", description: "Repo.", severity: "info" }, { id: "other", description: "Other.", severity: "minor" }] } });
+      .send({ settings: { rules: [{ id: "web-rule", description: "Repo.", severity: "info" }, { id: "other", description: "Other.", severity: "minor" }] }, settingsRevision: await repoRevision(repo.id) });
     expect(unrelated.status).toBe(200);
   });
 

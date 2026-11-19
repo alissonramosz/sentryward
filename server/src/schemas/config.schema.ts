@@ -5,10 +5,11 @@ import { forgeProviderSchema } from "../review/core/models.ts";
 // Replaces the global config as a whole; an empty object resets it to the
 // profile and the defaults. `revision` is the one the form loaded: a save
 // made after the settings changed is refused (lib/settingsRevision.ts).
-// Optional for API callers.
+// Required: a write without one could replace a rule approved since the
+// caller read the settings.
 export const updateGlobalConfigSchema = z.object({
   settings: dashboardOverrideSchema,
-  revision: z.string().max(64).optional(),
+  revision: z.string().max(64),
 });
 
 // The display preview: `base` is what the form inherits (the profile and

@@ -225,7 +225,8 @@ export async function updateRepo(req: Request, res: Response) {
         where: { id },
         select: { settings: true, directories: true, followGlobal: true },
       });
-      if (revision !== undefined && revision !== settingsRevision(saved.settings)) {
+      // The schema requires a revision whenever settings are sent.
+      if (revision !== settingsRevision(saved.settings)) {
         throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
       }
       requireRepoSettingsRules(existing.connection.workspace.reviewSettings, saved, settings, followGlobal ?? saved.followGlobal);

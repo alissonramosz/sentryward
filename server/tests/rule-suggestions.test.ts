@@ -166,6 +166,24 @@ describe("capturing review comments", () => {
     ]);
   });
 
+  it("fails the delivery when a top-level comment cannot be recorded, so it can be redelivered", async () => {
+    await githubRepo();
+    await enable();
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([GH_TOKEN, { url: /\/repos\/acme\/web\/collaborators\/alice\/permission$/, status: 502, body: { message: "Bad Gateway" } }]).fetch,
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const failed = await sendGithub("pull_request_review_comment", commentEvent(LONG));
+    expect(failed.status).toBe(500);
+    expect(failed.body.outcome).toBe("failed");
+    expect(await prisma.reviewComment.count()).toBe(0);
+
+    vi.stubGlobal("fetch", fetchStub([GH_TOKEN, ...ghRoles()]).fetch);
+    expect((await sendGithub("pull_request_review_comment", commentEvent(LONG))).body.outcome).toBe("recorded");
+  });
+
   it("skips bots, commands, markers, short remarks, outsiders and excluded reviewers", async () => {
     await githubRepo();
     await enable({ ruleSuggestionsExcludedReviewers: ["Carol"] });
@@ -896,6 +914,17 @@ describe("rule suggestions API", () => {
   it("refuses a malformed cursor", async () => {
     const res = await request(app).get("/api/rule-suggestions?cursor=nope").set("Cookie", cookie);
     expect(res.status).toBe(400);
+  });
+
+  it("refuses a cursor timestamp Postgres could not turn back into a time", async () => {
+    const id = "00000000-0000-4000-8000-000000000000";
+    for (const atMicros of ["99999999999999999999", "9223372036854775807", "253402300800000001"]) {
+      const res = await request(app).get(`/api/rule-suggestions?cursor=${atMicros}_${id}`).set("Cookie", cookie);
+      expect(res.status).toBe(400);
+    }
+    // The year 10000 itself still reaches the query.
+    const max = await request(app).get(`/api/rule-suggestions?cursor=253402300800000000_${id}`).set("Cookie", cookie);
+    expect(max.status).toBe(200);
   });
 
   it("counts suggestions without listing them", async () => {

@@ -92,7 +92,7 @@ export async function updateGlobalConfig(req: Request, res: Response) {
     const [current] = await tx.$queryRaw<{ review_settings: unknown }[]>`
       SELECT review_settings FROM workspaces WHERE id = ${req.workspaceId!}::uuid FOR NO KEY UPDATE
     `;
-    if (revision !== undefined && revision !== settingsRevision(current!.review_settings)) {
+    if (revision !== settingsRevision(current!.review_settings)) {
       throw new HttpError(409, "The global settings changed since the page loaded; reload and try again");
     }
     return tx.workspace.update({

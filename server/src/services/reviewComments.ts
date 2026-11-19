@@ -37,17 +37,18 @@ export interface ReviewCommentInput {
   allowed: () => Promise<boolean>;
 }
 
-export type ReviewCommentOutcome = "stored" | "off" | "skipped" | "not_allowed" | "duplicate";
+export type ReviewCommentOutcome = "stored" | "off" | "skipped" | "not_allowed" | "duplicate" | "failed";
 
 // Stores a person's comment on a changed line, if its workspace learns rules.
-// Never throws: a failure here must not fail the delivery, which may also
-// carry a thread reply.
+// Never throws: a delivery that also carries a thread reply must go on to it.
+// A failure is "failed", so a caller with nothing else to do can fail the
+// delivery and have it redelivered (a stored comment comes back "duplicate").
 export async function recordReviewComment(input: ReviewCommentInput): Promise<ReviewCommentOutcome> {
   try {
     return await record(input);
   } catch (err) {
     console.error("[webhook] could not store review comment %s on %s#%d", input.commentId, input.repo.fullPath, input.number, err);
-    return "skipped";
+    return "failed";
   }
 }
 

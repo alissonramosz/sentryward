@@ -23,7 +23,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   the feature is turned off is never kept. The excluded-reviewers list
   (`workspaces.rule_suggestions_excluded_reviewers`) is `NOT NULL`, so a
   `NULL` written outside the app is refused instead of crashing comment
-  storage or the settings page.
+  storage or the settings page. On GitHub, a top-level diff comment that cannot
+  be stored (a failed permission lookup or database error) fails the webhook
+  delivery with a 500, so it shows as failed and can be redelivered; a reply
+  in a thread still goes on to the reply handling.
   Once a week per workspace (or on **Check now**, at most hourly, counted from
   the request as well as the last run so a queued check cannot be requested
   again; `workspaces.rule_suggestions_requested_at`) the worker
@@ -63,7 +66,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   under the drafted id while the model is answering drops the draft.
   The list (`GET /api/rule-suggestions`) is paged, 100 at a time, newest
   first: pass the returned `nextCursor` as `?cursor=` for the next page, and
-  the page offers **Load more**. A page holds only suggestions still in the
+  the page offers **Load more**. A cursor whose timestamp is out of range is
+  refused with a 400. A page holds only suggestions still in the
   requested status; one decided while the page loads is left out. Worker shutdown waits for a running suggestion pass before
   disconnecting from the database.
   Removing a repository deletes its pending suggestions. The page leads with the suggestions: settings fold into a header showing
@@ -461,6 +465,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `sentryward/review` status, turn on Post commit status (`output.post_check`)
   in the global config or the repository settings before upgrading, or merges
   wait for a status that is no longer posted.
+- API callers that save settings must now send the revision they read:
+  `revision` (from `GET /api/config/global`) on `PUT /api/config/global`, and
+  `settingsRevision` (from `GET /api/repos`) on a `PATCH /api/repos/:id` that
+  sends `settings`. Saves without one are refused with a 400.
 
 ### Changed
 
@@ -568,8 +576,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   suggestion) is refused with "changed since the page loaded; reload and try
   again", instead of silently replacing their changes with the stale copy.
   `GET`/`PUT /api/config/global` return a `revision` and the repository list
-  a `settingsRevision`, derived from the saved settings; the API checks them
-  when a save sends them back (optional for API callers).
+  a `settingsRevision`, derived from the saved settings, and a save must send
+  them back: `PUT /api/config/global` requires `revision`, and
+  `PATCH /api/repos/:id` requires `settingsRevision` whenever it sends
+  `settings` (a 400 otherwise), so no save can replace a rule approved since
+  its settings were read.
 - On GitHub, `/sentryward review` now requires push access to the repository,
   checked by the commenter's repository role, as for thread replies. A comment's
   author association does not tell read and triage collaborators from writers,

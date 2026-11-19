@@ -6,10 +6,15 @@ export const MAX_EXCLUDED_REVIEWERS = 100;
 // A page cursor is the last row's `<created_at in epoch microseconds>_<id>`: a
 // keyset, so it keeps working after that row is approved or discarded and
 // leaves the list. Microseconds, as Postgres keeps them: a millisecond Date
-// would skip or repeat rows created within the same millisecond.
+// would skip or repeat rows created within the same millisecond. The list
+// query turns the timestamp back into a timestamptz, which fails in Postgres
+// ("interval out of range") well below the bigint limit, so a cursor past the
+// year 10000 is refused here instead. Real cursors are created_at values.
+const MAX_CURSOR_MICROS = 253402300800000000n;
+
 const listCursorSchema = z.string().transform((value, ctx) => {
   const match = /^(\d{1,20})_(.+)$/.exec(value);
-  if (!match || !z.uuid().safeParse(match[2]).success) {
+  if (!match || BigInt(match[1]!) > MAX_CURSOR_MICROS || !z.uuid().safeParse(match[2]).success) {
     ctx.addIssue({ code: "custom", message: "Invalid cursor" });
     return z.NEVER;
   }

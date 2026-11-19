@@ -216,7 +216,13 @@ export async function handleGithubEvent(
       isSelf: comment.user?.type === "Bot",
       allowed,
     });
-    if (!threadId) return { body: { outcome: stored === "stored" ? "recorded" : "ignored" } };
+    if (!threadId) {
+      // Nothing else rides on this delivery, so a failure fails it: GitHub
+      // shows it as failed and it can be redelivered, instead of the evidence
+      // being lost behind a success.
+      if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
+      return { body: { outcome: stored === "stored" ? "recorded" : "ignored" } };
+    }
     return recordThreadReply({
       repo,
       forge,

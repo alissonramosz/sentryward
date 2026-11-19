@@ -2057,7 +2057,7 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/repos/last-reviews` | `{ lastReviews }`, each added repository's newest run that wasn't skipped or superseded, by repository id; repositories with none are left out |
 | PUT    | `/api/repos/order` | Admins: `{ ids }`, every added repository in the workspace in the order to show them; 409 if the set has changed |
 | POST   | `/api/repos` | `{ connectionId, externalId }`, enables a repository for review |
-| PATCH  | `/api/repos/:id` | `{ enabled?, settings?, settingsRevision?, followGlobal? }`; `settings` replaces the saved review overrides, `followGlobal` makes the repository ignore them and its [folders](#folder-settings) and use only the global config. With `settingsRevision` (from the repository list or a previous save), 409 if the settings changed since |
+| PATCH  | `/api/repos/:id` | `{ enabled?, settings?, settingsRevision?, followGlobal? }`, with `settingsRevision` required when `settings` is sent; `settings` replaces the saved review overrides, `followGlobal` makes the repository ignore them and its [folders](#folder-settings) and use only the global config. `settingsRevision` comes from the repository list or a previous save; 409 if the settings changed since |
 | POST   | `/api/repos/:id/directories` | `{ path }`; adds a [folder](#folder-settings) with no settings of its own (400 if it overlaps a saved one) |
 | PUT    | `/api/repos/:id/directories` | `{ path, settings }`; replaces one saved folder's settings (404 if it is not saved). Only this folder's rules and connection are checked |
 | DELETE | `/api/repos/:id/directories?path=` | Removes one saved folder (404 if it is not saved) |
@@ -2184,7 +2184,7 @@ Workspace owners and admins only. See [Rule suggestions](#rule-suggestions).
 | ------ | ---- | ----------- |
 | GET    | `/api/config/schema` | Defaults, profiles, severities and categories for the settings UI, plus the context window per provider (`contextWindows`, `defaultContextWindow`) and `thinkingBudgets` an `auto` context budget is resolved from |
 | GET    | `/api/config/global` | The workspace's global review config, and what it resolves to with each value's source, plus its `revision` |
-| PUT    | `/api/config/global` | Workspace admins: `{ settings, revision? }`, replaces the global review config; `{}` resets it. With `revision` (from the last read or save), 409 if the config changed since |
+| PUT    | `/api/config/global` | Workspace admins: `{ settings, revision }`, replaces the global review config; `{ settings: {} }` resets it. `revision` comes from the last read or save (required); 409 if the config changed since |
 | POST   | `/api/config/rules/check` | `{ patterns }` (up to 50, 300 characters each): `{ errors }`, one per pattern in order, `null` when RE2 compiles it, otherwise the message a save would give |
 | POST   | `/api/config/triggers/check` | Whether a sample change would be reviewed under these trigger settings, from the worker's own skip rules (see below) |
 
