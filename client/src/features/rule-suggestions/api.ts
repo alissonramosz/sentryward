@@ -95,7 +95,12 @@ export function useSaveRuleSuggestionSettings() {
   return useMutation({
     mutationFn: (settings: Pick<SuggestionSettings, "enabled" | "minEvidence" | "excludedReviewers">) =>
       api<SuggestionSettings>("/rule-suggestions/settings", { method: "PUT", body: JSON.stringify(settings) }),
-    onSuccess: (data) => queryClient.setQueryData(SETTINGS_KEY, data),
+    onSuccess: (data) => {
+      queryClient.setQueryData(SETTINGS_KEY, data)
+      // Turning suggestions off or excluding a reviewer strips comment
+      // excerpts from the stored suggestions, which only the lists carry.
+      return queryClient.invalidateQueries({ queryKey: [...KEY, "list"] })
+    },
   })
 }
 

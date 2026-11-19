@@ -605,6 +605,9 @@ model Finding {
   @@unique([repositoryId, number, fingerprint])
   @@index([repositoryId, state])
   @@index([repositoryId, lifecycle])
+  // Postgres does not index foreign keys; without this, deleting a suggestion
+  // scans every finding to apply SET NULL.
+  @@index([suggestionId])
   @@map("findings")
 }
 
@@ -808,6 +811,8 @@ model ReviewComment {
 
   @@unique([repositoryId, forgeCommentId])
   @@index([repositoryId, createdAt])
+  // See Finding.suggestionId: the SET NULL on delete needs it.
+  @@index([suggestionId])
   @@map("review_comments")
 }
 

@@ -316,20 +316,30 @@ export async function pruneRuleHistory(
   const scope = workspaceIds ? Prisma.sql`AND workspace_id = ANY(${workspaceIds}::uuid[])` : Prisma.empty;
   // Each excerpt by its source's time: a new suggestion may quote a comment or
   // dismissal already near the cutoff. One stored without `at` falls back to
-  // the suggestion's own age.
-  const excerpts = await prisma.$executeRaw`
-    UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', COALESCE(
-      (SELECT jsonb_agg(x.e ORDER BY x.i) FROM jsonb_array_elements(evidence->'excerpts') WITH ORDINALITY x(e, i)
-       WHERE COALESCE((x.e->>'at')::timestamptz, created_at) >= ${cutoff}),
-      '[]'::jsonb
-    ))
-    WHERE jsonb_typeof(evidence->'excerpts') = 'array'
-      AND EXISTS (
-        SELECT 1 FROM jsonb_array_elements(evidence->'excerpts') e
-        WHERE COALESCE((e->>'at')::timestamptz, created_at) < ${cutoff}
-      )
-      ${scope}
-  `;
+  // the suggestion's own age. The rows are locked in id order first, as the
+  // settings save's excerpt strip does: two bulk UPDATEs locking the same rows
+  // in different orders would deadlock.
+  const excerpts = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM rule_suggestions
+      WHERE jsonb_typeof(evidence->'excerpts') = 'array'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(evidence->'excerpts') e
+          WHERE COALESCE((e->>'at')::timestamptz, created_at) < ${cutoff}
+        )
+        ${scope}
+      ORDER BY id FOR UPDATE
+    `;
+    if (!locked.length) return 0;
+    return tx.$executeRaw`
+      UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', COALESCE(
+        (SELECT jsonb_agg(x.e ORDER BY x.i) FROM jsonb_array_elements(evidence->'excerpts') WITH ORDINALITY x(e, i)
+         WHERE COALESCE((x.e->>'at')::timestamptz, created_at) >= ${cutoff}),
+        '[]'::jsonb
+      ))
+      WHERE id = ANY(${locked.map((row) => row.id)}::uuid[])
+    `;
+  });
   return { comments, excerpts };
 }
 

@@ -100,18 +100,26 @@ export async function getRuleSuggestionSettings(req: Request, res: Response) {
 // Drops the review comment excerpts (people's words) from the workspace's
 // suggestions, or only from those listed. Dismissal excerpts stay with the
 // findings they quote. Excerpts name no author, so a suggestion loses all its
-// comment excerpts, not only one reviewer's.
+// comment excerpts, not only one reviewer's. The rows are locked in id order
+// first, as retention's excerpt trim does: two bulk UPDATEs locking the same
+// rows in different orders would deadlock.
 async function stripCommentExcerpts(tx: Prisma.TransactionClient, workspaceId: string, suggestionIds?: string[]) {
   const scope = suggestionIds ? Prisma.sql`AND id = ANY(${suggestionIds}::uuid[])` : Prisma.empty;
+  const locked = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM rule_suggestions
+    WHERE workspace_id = ${workspaceId}::uuid
+      AND jsonb_typeof(evidence->'excerpts') = 'array'
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(evidence->'excerpts') e WHERE e->>'kind' = 'comment')
+      ${scope}
+    ORDER BY id FOR UPDATE
+  `;
+  if (!locked.length) return;
   await tx.$executeRaw`
     UPDATE rule_suggestions SET evidence = jsonb_set(evidence, '{excerpts}', COALESCE(
       (SELECT jsonb_agg(e) FROM jsonb_array_elements(evidence->'excerpts') e WHERE e->>'kind' IS DISTINCT FROM 'comment'),
       '[]'::jsonb
     ))
-    WHERE workspace_id = ${workspaceId}::uuid
-      AND jsonb_typeof(evidence->'excerpts') = 'array'
-      AND EXISTS (SELECT 1 FROM jsonb_array_elements(evidence->'excerpts') e WHERE e->>'kind' = 'comment')
-      ${scope}
+    WHERE id = ANY(${locked.map((row) => row.id)}::uuid[])
   `;
 }
 
@@ -217,15 +225,17 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
   const workspaceId = req.workspaceId!;
 
   const suggestion = await prisma.$transaction(async (tx) => {
-    await lockPending(tx, workspaceId, id);
     // Under the workspace row lock, so concurrent approvals each add to the
     // latest settings. The global settings save (updateGlobalConfig) replaces
     // the whole object without it, so a settings form left open can still
     // drop this rule; the client refreshes the global config on approve to
-    // keep that window short.
+    // keep that window short. Taken before the suggestion's lock, in the same
+    // order as saveRuleSuggestionSettings (workspace, then suggestions), which
+    // would otherwise deadlock with this.
     const [workspace] = await tx.$queryRaw<{ review_settings: unknown }[]>`
       SELECT review_settings FROM workspaces WHERE id = ${workspaceId}::uuid FOR NO KEY UPDATE
     `;
+    await lockPending(tx, workspaceId, id);
     let appliedTarget: string;
     if (target === "global") {
       const settings = withRule(workspace!.review_settings, rule, "global");

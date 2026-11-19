@@ -3,7 +3,7 @@ import type { Resolve } from "../lib/hostSafety.ts";
 import { prisma } from "../lib/prisma.ts";
 import { resolveDashboardLayers } from "../review/config/load.ts";
 import type { Rule } from "../review/config/schema.ts";
-import { HISTORY_MS, preselect, storedEvidence, validateSuggestions, type EvidenceItem } from "../review/learn/suggest.ts";
+import { preselect, storedEvidence, validateSuggestions, type EvidenceItem } from "../review/learn/suggest.ts";
 import { createGenerate, modelChain, type ApiKeys, type Endpoint, type Generate, type ProviderBaseUrls } from "../review/llm/providers.ts";
 import { suggestRules } from "../review/llm/ruleSuggest.ts";
 import { llmCredentialsFor } from "../services/llm.ts";
@@ -79,8 +79,10 @@ function repoLabel(repo: { host: string; fullPath: string }): string {
   return `${repo.host}/${repo.fullPath}`;
 }
 
-async function loadEvidence(workspaceId: string, excluded: string[], now: Date): Promise<EvidenceItem[]> {
-  const since = new Date(now.getTime() - HISTORY_MS);
+// `since` is the retention cutoff (ruleHistoryCutoff), not the bare history
+// window: anything older would be dropped at save time after the model call
+// was paid for, and is past what the workspace agreed to keep.
+async function loadEvidence(workspaceId: string, excluded: string[], since: Date): Promise<EvidenceItem[]> {
   const inWorkspace = { connection: { workspaceId } };
   const [dismissals, comments] = await Promise.all([
     prisma.finding.findMany({
@@ -215,7 +217,9 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
     select: { name: true, reviewSettings: true, ruleSuggestionsMinEvidence: true, ruleSuggestionsExcludedReviewers: true },
   });
   const minEvidence = workspace.ruleSuggestionsMinEvidence;
-  const evidence = preselect(await loadEvidence(workspaceId, workspace.ruleSuggestionsExcludedReviewers, now), minEvidence);
+  const policy = await deps.policyFor(workspaceId);
+  const since = ruleHistoryCutoff(policy.retentionDays, now);
+  const evidence = preselect(await loadEvidence(workspaceId, workspace.ruleSuggestionsExcludedReviewers, since), minEvidence);
   if (!evidence.length) return { workspaceId, outcome: "not_enough_history" };
 
   // The workspace's own model settings, as its global config resolves them:
@@ -223,7 +227,6 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
   const config = resolveDashboardLayers({ globalSettings: workspace.reviewSettings, followGlobal: true }).config;
   const model = modelChain(config.llm, "review")[0]!;
   const llm = resolveLlm(config, [model], await deps.credentialsFor(workspaceId));
-  const policy = await deps.policyFor(workspaceId);
   const guard = await guardModels(policy, [model, ...llm.fallbackModels], llm.endpoint, llm.baseUrls, deps.resolveHost);
   const refused = guard.rejected.get(model);
   if (refused) {
@@ -260,9 +263,10 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
     // retention deletes comments and findings, and a dismissal can be undone.
     // Lock the ones still standing (the level of the suggestion_id update
     // below, which conflicts with a delete) so none goes before this commits,
-    // and only those retention would keep: anything past its cutoff could be
-    // deleted the moment the lock is released, leaving an excerpt behind. A
-    // suggestion missing any of its evidence is dropped whole.
+    // and only those retention would keep: evidence was loaded within the
+    // cutoff, but an item can age past it during the model call and be deleted
+    // the moment the lock is released, leaving an excerpt behind. A suggestion
+    // missing any of its evidence is dropped whole.
     const cutoff = ruleHistoryCutoff(policy.retentionDays, new Date());
     const commentIds = suggestions.flatMap((s) => s.evidence.filter((item) => item.kind === "comment").map((item) => item.id));
     const findingIds = suggestions.flatMap((s) => s.evidence.filter((item) => item.kind === "dismissal").map((item) => item.id));

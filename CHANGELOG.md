@@ -24,8 +24,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   Once a week per workspace (or on **Check now**, at most hourly, counted from
   the request as well as the last run so a queued check cannot be requested
   again; `workspaces.rule_suggestions_requested_at`) the worker
-  groups the last 90 days of comments and false-positive or intentional
-  dismissals, and when something recurs across at least two changes and the
+  groups the last 90 days (or the workspace's privacy retention period, when
+  shorter) of comments and false-positive or intentional dismissals, and when
+  something recurs across at least two changes and the
   minimum evidence, asks the workspace's review model for at most five rules
   (audited as `rule_suggest`, privacy restrictions applied). Drafts with an
   invalid rule, a taken id (including any discarded suggestion's) or too
@@ -549,6 +550,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- On GitHub, `/sentryward review` now requires push access to the repository,
+  checked by the commenter's repository role, as for thread replies. A comment's
+  author association does not tell read and triage collaborators from writers,
+  so they could previously start a review billed to the workspace.
 - The Recent reviews lists on the Home and Usage pages label an untitled
   GitLab merge request as `Merge request !42` and an untitled GitHub pull
   request as `Pull request #42`, instead of `#42`, and the Usage list writes a

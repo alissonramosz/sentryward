@@ -318,12 +318,17 @@ describe("POST /api/webhooks/github", () => {
     expect(jobs[0]!.repositoryId).toBe(first.id);
   });
 
-  const commentEvent = (association: string, body = "Looks odd.\n/sentryward review please") => ({
+  const commentEvent = (association: string, body = "Looks odd.\n/sentryward review please", login = "alice") => ({
     action: "created",
     installation: { id: 55 },
     repository: { id: 900 },
     issue: { number: 42, pull_request: {} },
-    comment: { body, author_association: association },
+    comment: { body, author_association: association, user: { login } },
+  });
+  // The commenter's repository role, which decides who may ask for a review.
+  const role = (login: string, roleName: string) => ({
+    url: new RegExp(`/repos/acme/web/collaborators/${login}/permission$`),
+    body: { role_name: roleName, user: { login, permissions: { push: ["admin", "maintain", "write"].includes(roleName) } } },
   });
 
   it("queues a review for /sentryward review from a collaborator at the current head", async () => {
@@ -336,6 +341,7 @@ describe("POST /api/webhooks/github", () => {
           url: /\/app\/installations\/55\/access_tokens$/,
           body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
         },
+        role("alice", "write"),
         { url: /\/repos\/acme\/web\/pulls\/42$/, body: { state: "open", title: "T", base: { sha: "basenow", ref: "main" }, head: { sha: "headnow" } } },
       ]).fetch,
     );
@@ -356,6 +362,7 @@ describe("POST /api/webhooks/github", () => {
           url: /\/app\/installations\/55\/access_tokens$/,
           body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
         },
+        role("alice", "write"),
         { url: /\/repos\/acme\/web\/pulls\/42$/, body: { state: "open", title: "T", base: { sha: "basenow", ref: "main" }, head: { sha: "headnow" } } },
       ]).fetch,
     );
@@ -367,7 +374,21 @@ describe("POST /api/webhooks/github", () => {
 
   it("ignores the command from someone without push access, and comments without it", async () => {
     await githubRepo();
-    expect((await sendGithub("issue_comment", commentEvent("NONE"))).body.outcome).toBe("not_allowed");
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([
+        {
+          method: "POST",
+          url: /\/app\/installations\/55\/access_tokens$/,
+          body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        },
+        // COLLABORATOR also covers read and triage collaborators.
+        role("dave", "read"),
+        { url: /\/repos\/acme\/web\/collaborators\/[^/]+\/permission$/, status: 404, body: { message: "Not Found" } },
+      ]).fetch,
+    );
+    expect((await sendGithub("issue_comment", commentEvent("COLLABORATOR", undefined, "dave"))).body.outcome).toBe("not_allowed");
+    expect((await sendGithub("issue_comment", commentEvent("NONE", undefined, "eve"))).body.outcome).toBe("not_allowed");
     expect((await sendGithub("issue_comment", commentEvent("OWNER", "nice work"))).body.outcome).toBe("ignored");
     expect(await prisma.reviewJob.count()).toBe(0);
   });

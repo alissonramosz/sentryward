@@ -25,10 +25,6 @@ import { decryptToken } from "./token.ts";
 
 // "synchronize" brings new commits; the rest make a change reviewable.
 const PR_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
-// Who may ask for a review in a comment, or act on a finding by replying to
-// it: people who can already push.
-const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-
 // The uninstall webhook cleared the installation id; the connection is kept
 // for its history until a reinstall reattaches it. An HttpError, so it reaches
 // the client as is whether thrown before or inside a forge call.
@@ -235,11 +231,16 @@ export async function handleGithubEvent(
     });
   }
 
-  if (!TRUSTED.has(payload.comment!.author_association)) {
+  // Only people who can already push may start a (billed) review. Checked by
+  // repository role, as for thread replies: author_association COLLABORATOR
+  // also covers read and triage collaborators.
+  const forge = adapterFor(repo.connection);
+  const login = payload.comment!.user?.login;
+  if (!login || !(await forge.canPush(repo.fullPath, login))) {
     return { body: { outcome: "not_allowed" } };
   }
   const number = payload.issue!.number;
-  const head = await adapterFor(repo.connection).getChangeHead(repo.fullPath, number);
+  const head = await forge.getChangeHead(repo.fullPath, number);
   const job = await enqueue({
     repositoryId: repo.id,
     number,

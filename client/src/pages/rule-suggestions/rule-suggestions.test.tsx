@@ -182,4 +182,25 @@ describe("Rule suggestions page", () => {
     expect(JSON.parse(String(init.body))).toEqual({ enabled: true, minEvidence: 3, excludedReviewers: [] })
     expect(screen.getByText(/Nothing to review/)).toBeInTheDocument()
   })
+
+  it("reloads the list after saving settings, which may strip comment excerpts", async () => {
+    const stripped = { ...suggestion, evidence: { ...suggestion.evidence, excerpts: [] } }
+    const pending = vi
+      .fn()
+      .mockImplementationOnce(() => jsonResponse(200, list([suggestion])))
+      .mockImplementation(() => jsonResponse(200, list([stripped])))
+    const save = vi.fn(() => jsonResponse(200, { ...settings, minEvidence: 3 }))
+    mockApi({ ...base, [PENDING]: pending, "PUT /api/rule-suggestions/settings": save })
+    renderWithProviders(<App />, { route: "/rule-suggestions" })
+
+    await screen.findByText("db-in-repos")
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }))
+    const min = screen.getByLabelText("Minimum evidence")
+    await userEvent.clear(min)
+    await userEvent.type(min, "3")
+    await userEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(save).toHaveBeenCalled())
+    await waitFor(() => expect(pending).toHaveBeenCalledTimes(2))
+  })
 })

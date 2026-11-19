@@ -623,16 +623,43 @@ describe("worker run", () => {
     expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
 
-  it("drops a suggestion citing evidence past the workspace's retention period", async () => {
+  const thirtyDays = async () =>
+    mergePolicy({ ...OPEN_LAYER, auditRetentionDays: null, retentionSource: null }, { ...OPEN_LAYER, retentionDays: 30 });
+  const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000);
+
+  it("reads no history past the workspace's retention period", async () => {
     const repo = await githubRepo();
     await enable({ ruleSuggestionsMinEvidence: 3 });
     await history(repo.id, 5);
-    // Within the 90-day window the run reads, but past a 30-day privacy period.
-    await prisma.reviewComment.updateMany({ data: { createdAt: new Date(Date.now() - 40 * 86_400_000) } });
-    const thirtyDays = async () =>
-      mergePolicy({ ...OPEN_LAYER, auditRetentionDays: null, retentionSource: null }, { ...OPEN_LAYER, retentionDays: 30 });
+    await dismissals(repo.id, 3);
+    // Within the 90-day history window, but past a 30-day privacy period: it
+    // would be dropped at save time, so it must not cost a model call.
+    await prisma.reviewComment.updateMany({ data: { createdAt: daysAgo(40) } });
+    await prisma.finding.updateMany({ data: { ignoredAt: daysAgo(45) } });
+    const { model, runDeps } = deps(draft(["c1", "c2", "c3"]), { policyFor: thirtyDays });
 
-    const runDeps = deletingMidCall(["c1", "c2", "c3"], async () => undefined, { policyFor: thirtyDays });
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "not_enough_history" });
+    expect(model.requests).toHaveLength(0);
+  });
+
+  it("reads history inside the retention period", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await dismissals(repo.id, 3);
+    await prisma.finding.updateMany({ data: { ignoredAt: daysAgo(10) } });
+    const { model, runDeps } = deps(draft(["d1", "d2", "d3"]), { policyFor: thirtyDays });
+
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 1 });
+    expect(model.requests).toHaveLength(1);
+  });
+
+  it("drops a suggestion citing evidence that ages past the retention period during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+
+    const ageOut = () => prisma.reviewComment.updateMany({ data: { createdAt: daysAgo(40) } });
+    const runDeps = deletingMidCall(["c1", "c2", "c3"], ageOut, { policyFor: thirtyDays });
     expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
     expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
