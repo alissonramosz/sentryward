@@ -139,6 +139,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 afterAll(async () => {
@@ -559,6 +560,54 @@ describe("worker run", () => {
     expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "turned_off" });
     expect(await prisma.ruleSuggestion.count()).toBe(0);
     expect(await prisma.reviewComment.count()).toBe(0);
+  });
+
+  it("makes no model call when suggestions are turned off after the claim", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    // Credentials are loaded after the claim and before the call.
+    const { model, runDeps } = deps(draft(["c1", "c2", "c3"]), {
+      credentialsFor: async () => {
+        const res = await request(app)
+          .put("/api/rule-suggestions/settings")
+          .set("Cookie", cookie)
+          .send({ enabled: false, minEvidence: 3, excludedReviewers: [] });
+        expect(res.status).toBe(200);
+        return credentials();
+      },
+    });
+
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "turned_off" });
+    expect(model.requests).toHaveLength(0);
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
+  it("aborts the model call when suggestions are turned off while it runs", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    const { runDeps } = deps(draft(["c1", "c2", "c3"]));
+    let aborted = false;
+    const generate: ReturnType<RuleSuggestionDeps["generateFor"]> = async (req) => {
+      const res = await request(app)
+        .put("/api/rule-suggestions/settings")
+        .set("Cookie", cookie)
+        .send({ enabled: false, minEvidence: 3, excludedReviewers: [] });
+      expect(res.status).toBe(200);
+      // Answers only once aborted, as a provider would stop streaming.
+      return new Promise((_, reject) => {
+        req.abortSignal!.addEventListener("abort", () => {
+          aborted = true;
+          reject(req.abortSignal!.reason);
+        });
+      });
+    };
+
+    const outcome = await runNextRuleSuggestions(new Date(), { ...runDeps, generateFor: () => generate, claimCheckIntervalMs: 10 });
+    expect(outcome).toMatchObject({ outcome: "turned_off" });
+    expect(aborted).toBe(true);
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
 
   it("drops a suggestion citing comments of a reviewer excluded during the model call", async () => {

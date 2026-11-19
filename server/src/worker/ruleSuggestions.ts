@@ -4,11 +4,12 @@ import { prisma } from "../lib/prisma.ts";
 import { resolveDashboardLayers } from "../review/config/load.ts";
 import type { Rule } from "../review/config/schema.ts";
 import { preselect, storedEvidence, validateSuggestions, type EvidenceItem } from "../review/learn/suggest.ts";
-import { createGenerate, modelChain, type ApiKeys, type Endpoint, type Generate, type ProviderBaseUrls } from "../review/llm/providers.ts";
+import { abortableGenerate, createGenerate, modelChain, type ApiKeys, type Endpoint, type Generate, type ProviderBaseUrls } from "../review/llm/providers.ts";
 import { suggestRules } from "../review/llm/ruleSuggest.ts";
 import { llmCredentialsFor } from "../services/llm.ts";
 import { auditedGenerate } from "../services/llmAudit.ts";
 import { guardModels, policyFor, type EffectivePolicy } from "../services/privacyPolicy.ts";
+import { CLOSE_CHECK_INTERVAL_MS, watchForClose } from "./closeWatch.ts";
 import { resolveLlm, type LlmCredentials } from "./llmEndpoint.ts";
 import { ruleHistoryCutoff } from "./retention.ts";
 
@@ -29,6 +30,8 @@ export interface RuleSuggestionDeps {
   credentialsFor: (workspaceId: string) => Promise<LlmCredentials>;
   policyFor: (workspaceId: string) => Promise<EffectivePolicy>;
   resolveHost?: Resolve;
+  // How often a run checks, while the model answers, that it may still go on.
+  claimCheckIntervalMs?: number;
 }
 
 const defaultDeps: RuleSuggestionDeps = {
@@ -60,6 +63,19 @@ async function claimDueWorkspace(now: Date): Promise<string | null> {
     RETURNING id
   `;
   return rows[0]?.id ?? null;
+}
+
+// Whether the run claimed at `claimedAt` may still go on: suggestions are on,
+// and no other claim has replaced it. The claim time is the token: turning
+// suggestions off stops the run whatever happens next, and Check now cannot
+// clear it while the run is in flight, as it refuses runs started within the
+// hour.
+async function claimStillCurrent(db: Prisma.TransactionClient, workspaceId: string, claimedAt: Date): Promise<boolean> {
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT id FROM workspaces
+    WHERE id = ${workspaceId}::uuid AND rule_suggestions_enabled AND rule_suggestions_last_run_at = ${claimedAt}
+  `;
+  return rows.length > 0;
 }
 
 // Runs one due workspace, if any. The worker calls this in the background, one
@@ -235,17 +251,36 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
     return { workspaceId, outcome: "blocked", reason: refused.message };
   }
   const fallbackModels = llm.fallbackModels.filter((fallback) => !guard.rejected.has(fallback));
-  const generate = auditedGenerate(deps.generateFor(llm.keys, llm.endpoint, llm.baseUrls), guard.target, {
+  const known = await knownRules(prisma, workspaceId, workspace.reviewSettings);
+
+  // Suggestions may have been turned off since the claim, and the stored
+  // comments deleted with them: checking only at save time would still send
+  // the evidence loaded above and bill the call. Checked again now, the last
+  // moment before the request, and while it runs, aborting it (fallbacks
+  // included) once the claim stops being current.
+  if (!(await claimStillCurrent(prisma, workspaceId, now))) return { workspaceId, outcome: "turned_off" };
+  const watch = watchForClose(
+    async () => !(await claimStillCurrent(prisma, workspaceId, now)),
+    deps.claimCheckIntervalMs ?? CLOSE_CHECK_INTERVAL_MS,
+  );
+  const generate = auditedGenerate(abortableGenerate(deps.generateFor(llm.keys, llm.endpoint, llm.baseUrls), watch.signal), guard.target, {
     workspaceId,
     workspaceName: workspace.name,
   }, guard);
-
-  const known = await knownRules(prisma, workspaceId, workspace.reviewSettings);
-  const { drafts, response } = await suggestRules(
-    generate,
-    { evidence, existingRules: known.existingRules, discarded: known.discarded },
-    { ...config, llm: { ...config.llm, fallbackModels } },
-  );
+  let result: Awaited<ReturnType<typeof suggestRules>>;
+  try {
+    result = await suggestRules(
+      generate,
+      { evidence, existingRules: known.existingRules, discarded: known.discarded },
+      { ...config, llm: { ...config.llm, fallbackModels } },
+    );
+  } catch (err) {
+    if (watch.signal.aborted) return { workspaceId, outcome: "turned_off" };
+    throw err;
+  } finally {
+    watch.stop();
+  }
+  const { drafts, response } = result;
 
   const saved = await prisma.$transaction(async (tx) => {
     // The settings may have changed during the model call. Read them again
@@ -253,9 +288,12 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
     // (or excluding a reviewer) updates this row before deleting stored
     // comments and stripping excerpts, so either that waits for this
     // transaction and strips what it writes, or this sees the new settings and
-    // the deletions. FOR KEY SHARE would not conflict with that update.
+    // the deletions. FOR KEY SHARE would not conflict with that update. The
+    // claim time is compared too (see claimStillCurrent), so turning
+    // suggestions off and on again during the call still stops this run.
     const [current] = await tx.$queryRaw<{ enabled: boolean; min_evidence: number; review_settings: unknown }[]>`
-      SELECT rule_suggestions_enabled AS enabled, rule_suggestions_min_evidence AS min_evidence, review_settings
+      SELECT rule_suggestions_enabled AND rule_suggestions_last_run_at IS NOT DISTINCT FROM ${now} AS enabled,
+        rule_suggestions_min_evidence AS min_evidence, review_settings
       FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
     `;
     if (!current?.enabled) return null;
