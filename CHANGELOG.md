@@ -48,7 +48,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   is dropped. A run also re-checks that the feature is still on, and that its
   claim has not been replaced, just before the model call and every 15 seconds
   while it runs, so a run turned off after it was claimed makes no billed
-  request, or has its request (and fallbacks) aborted. Before saving, a run also locks every comment and dismissal it
+  request, or has its request (and fallbacks) aborted. Each claim carries a
+  run token (`workspaces.rule_suggestions_run_token`) that turning the feature
+  off clears, so a run stays stopped even when the feature is turned back on
+  before it checks again. Before saving, a run also locks every comment and dismissal it
   cites, so retention cannot delete one until the suggestion is stored, and
   drops any suggestion whose evidence is gone, no longer dismissed, or already
   past the workspace's retention cutoff, so no excerpt outlives what it quotes.

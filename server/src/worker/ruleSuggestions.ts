@@ -47,11 +47,12 @@ export type RunOutcome =
 // Claims the workspace most overdue for a run and marks it run, in one
 // statement: SKIP LOCKED keeps two workers off the same workspace, and the
 // mark is set before the model call so a failing run waits a full interval
-// instead of retrying (and billing) every poll.
-async function claimDueWorkspace(now: Date): Promise<string | null> {
+// instead of retrying (and billing) every poll. The returned token identifies
+// this run (see claimStillCurrent).
+async function claimDueWorkspace(now: Date): Promise<{ id: string; token: string } | null> {
   const due = new Date(now.getTime() - SUGGEST_INTERVAL_MS);
-  const rows = await prisma.$queryRaw<{ id: string }[]>`
-    UPDATE workspaces SET rule_suggestions_last_run_at = ${now}
+  const rows = await prisma.$queryRaw<{ id: string; token: string }[]>`
+    UPDATE workspaces SET rule_suggestions_last_run_at = ${now}, rule_suggestions_run_token = gen_random_uuid()
     WHERE id = (
       SELECT id FROM workspaces
       WHERE rule_suggestions_enabled
@@ -60,20 +61,20 @@ async function claimDueWorkspace(now: Date): Promise<string | null> {
       LIMIT 1
       FOR UPDATE SKIP LOCKED
     )
-    RETURNING id
+    RETURNING id, rule_suggestions_run_token::text AS token
   `;
-  return rows[0]?.id ?? null;
+  return rows[0] ?? null;
 }
 
-// Whether the run claimed at `claimedAt` may still go on: suggestions are on,
-// and no other claim has replaced it. The claim time is the token: turning
-// suggestions off stops the run whatever happens next, and Check now cannot
-// clear it while the run is in flight, as it refuses runs started within the
-// hour.
-async function claimStillCurrent(db: Prisma.TransactionClient, workspaceId: string, claimedAt: Date): Promise<boolean> {
+// Whether the run holding `token` may still go on: suggestions are on, and
+// neither another claim nor turning suggestions off has replaced the token.
+// The claim time could not serve: saving the settings leaves it alone, so
+// turning suggestions off and on again between two checks would make the run
+// current again, with evidence loaded before its rows were deleted.
+async function claimStillCurrent(db: Prisma.TransactionClient, workspaceId: string, token: string): Promise<boolean> {
   const rows = await db.$queryRaw<{ id: string }[]>`
     SELECT id FROM workspaces
-    WHERE id = ${workspaceId}::uuid AND rule_suggestions_enabled AND rule_suggestions_last_run_at = ${claimedAt}
+    WHERE id = ${workspaceId}::uuid AND rule_suggestions_enabled AND rule_suggestions_run_token = ${token}::uuid
   `;
   return rows.length > 0;
 }
@@ -81,10 +82,11 @@ async function claimStillCurrent(db: Prisma.TransactionClient, workspaceId: stri
 // Runs one due workspace, if any. The worker calls this in the background, one
 // at a time, so a slow model never holds up claiming reviews.
 export async function runNextRuleSuggestions(now = new Date(), deps: RuleSuggestionDeps = defaultDeps): Promise<RunOutcome | null> {
-  const workspaceId = await claimDueWorkspace(now);
-  if (!workspaceId) return null;
+  const claim = await claimDueWorkspace(now);
+  if (!claim) return null;
+  const workspaceId = claim.id;
   try {
-    return await suggestForWorkspace(workspaceId, now, deps);
+    return await suggestForWorkspace(workspaceId, claim.token, now, deps);
   } catch (err) {
     console.error("[worker] rule suggestions failed for workspace %s", workspaceId, err);
     return { workspaceId, outcome: "failed", reason: err instanceof Error ? err.message : String(err) };
@@ -228,7 +230,7 @@ async function knownRules(db: Prisma.TransactionClient, workspaceId: string, glo
   };
 }
 
-export async function suggestForWorkspace(workspaceId: string, now: Date, deps: RuleSuggestionDeps = defaultDeps): Promise<RunOutcome> {
+export async function suggestForWorkspace(workspaceId: string, token: string, now: Date, deps: RuleSuggestionDeps = defaultDeps): Promise<RunOutcome> {
   const workspace = await prisma.workspace.findUniqueOrThrow({
     where: { id: workspaceId },
     select: { name: true, reviewSettings: true, ruleSuggestionsMinEvidence: true, ruleSuggestionsExcludedReviewers: true },
@@ -258,9 +260,9 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
   // the evidence loaded above and bill the call. Checked again now, the last
   // moment before the request, and while it runs, aborting it (fallbacks
   // included) once the claim stops being current.
-  if (!(await claimStillCurrent(prisma, workspaceId, now))) return { workspaceId, outcome: "turned_off" };
+  if (!(await claimStillCurrent(prisma, workspaceId, token))) return { workspaceId, outcome: "turned_off" };
   const watch = watchForClose(
-    async () => !(await claimStillCurrent(prisma, workspaceId, now)),
+    async () => !(await claimStillCurrent(prisma, workspaceId, token)),
     deps.claimCheckIntervalMs ?? CLOSE_CHECK_INTERVAL_MS,
   );
   const generate = auditedGenerate(abortableGenerate(deps.generateFor(llm.keys, llm.endpoint, llm.baseUrls), watch.signal), guard.target, {
@@ -289,10 +291,10 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
     // comments and stripping excerpts, so either that waits for this
     // transaction and strips what it writes, or this sees the new settings and
     // the deletions. FOR KEY SHARE would not conflict with that update. The
-    // claim time is compared too (see claimStillCurrent), so turning
+    // run token is compared too (see claimStillCurrent), so turning
     // suggestions off and on again during the call still stops this run.
     const [current] = await tx.$queryRaw<{ enabled: boolean; min_evidence: number; review_settings: unknown }[]>`
-      SELECT rule_suggestions_enabled AND rule_suggestions_last_run_at IS NOT DISTINCT FROM ${now} AS enabled,
+      SELECT rule_suggestions_enabled AND rule_suggestions_run_token IS NOT DISTINCT FROM ${token}::uuid AS enabled,
         rule_suggestions_min_evidence AS min_evidence, review_settings
       FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
     `;

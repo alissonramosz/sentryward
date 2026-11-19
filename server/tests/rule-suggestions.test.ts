@@ -610,6 +610,72 @@ describe("worker run", () => {
     expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
 
+  // Off and on again between two checks: the run must not become current
+  // again, as the comments it loaded were deleted when it was turned off.
+  async function offAndOnAgain() {
+    for (const enabled of [false, true]) {
+      const res = await request(app).put("/api/rule-suggestions/settings").set("Cookie", cookie).send({ enabled, minEvidence: 3, excludedReviewers: [] });
+      expect(res.status).toBe(200);
+    }
+  }
+
+  it("saves nothing when suggestions are turned off and on again during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    const { model, runDeps } = deps(draft(["c1", "c2", "c3"]));
+    const generate: typeof model.generate = async (req) => {
+      await offAndOnAgain();
+      return model.generate(req);
+    };
+
+    // Checked only at save time: no watcher poll lands during the call.
+    const outcome = await runNextRuleSuggestions(new Date(), { ...runDeps, generateFor: () => generate, claimCheckIntervalMs: 60_000 });
+    expect(outcome).toMatchObject({ outcome: "turned_off" });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+    expect(await prisma.reviewComment.count()).toBe(0);
+  });
+
+  it("makes no model call when suggestions are turned off and on again after the claim", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    const { model, runDeps } = deps(draft(["c1", "c2", "c3"]), {
+      credentialsFor: async () => {
+        await offAndOnAgain();
+        return credentials();
+      },
+    });
+
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "turned_off" });
+    expect(model.requests).toHaveLength(0);
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
+  it("aborts the model call when suggestions are turned off and on again while it runs", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    const { runDeps } = deps(draft(["c1", "c2", "c3"]));
+    let aborted = false;
+    const generate: ReturnType<RuleSuggestionDeps["generateFor"]> = async (req) => {
+      // A poll may or may not land between the two saves; the run must stop
+      // either way, as the abort is what ends this call.
+      await offAndOnAgain();
+      return new Promise((_, reject) => {
+        req.abortSignal!.addEventListener("abort", () => {
+          aborted = true;
+          reject(req.abortSignal!.reason);
+        });
+      });
+    };
+
+    const outcome = await runNextRuleSuggestions(new Date(), { ...runDeps, generateFor: () => generate, claimCheckIntervalMs: 10 });
+    expect(outcome).toMatchObject({ outcome: "turned_off" });
+    expect(aborted).toBe(true);
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
   it("drops a suggestion citing comments of a reviewer excluded during the model call", async () => {
     const repo = await githubRepo();
     await enable({ ruleSuggestionsMinEvidence: 3 });

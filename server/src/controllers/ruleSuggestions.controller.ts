@@ -139,6 +139,9 @@ export async function saveRuleSuggestionSettings(req: Request, res: Response) {
         ruleSuggestionsEnabled: enabled,
         ruleSuggestionsMinEvidence: minEvidence,
         ruleSuggestionsExcludedReviewers: excludedReviewers,
+        // Stops a run in flight for good: turning suggestions back on before
+        // it checks again does not make its claim current again.
+        ...(enabled ? {} : { ruleSuggestionsRunToken: null }),
       },
     });
     const inWorkspace = { repository: { connection: { workspaceId } } };

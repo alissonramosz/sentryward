@@ -92,6 +92,10 @@ model Workspace {
   ruleSuggestionsExcludedReviewers String[]  @default([]) @map("rule_suggestions_excluded_reviewers")
   // Set when a run starts, so a failing run waits a full interval. Null is due.
   ruleSuggestionsLastRunAt         DateTime? @map("rule_suggestions_last_run_at") @db.Timestamptz
+  // Identifies the run in flight. Each claim sets a new one and turning
+  // suggestions off clears it, so a run cannot become current again when
+  // suggestions are turned back on.
+  ruleSuggestionsRunToken          String?   @map("rule_suggestions_run_token") @db.Uuid
   // When Check now was last pressed. Only the cooldown reads it: a requested
   // run clears ruleSuggestionsLastRunAt, so that alone cannot hold it off.
   ruleSuggestionsRequestedAt       DateTime? @map("rule_suggestions_requested_at") @db.Timestamptz
