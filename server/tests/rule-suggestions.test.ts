@@ -663,6 +663,36 @@ describe("worker run", () => {
     expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
     expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
+
+  it("drops a suggestion short of an evidence minimum raised during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+
+    const runDeps = savingMidCall({ enabled: true, minEvidence: 4, excludedReviewers: [] });
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
+  it("drops a suggestion whose rule id was taken during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+
+    const addRule = () =>
+      prisma.workspace.update({
+        where: { id: workspaceId },
+        data: {
+          reviewSettings: {
+            llm: { connection: "anthropic" },
+            rules: [{ id: "db-in-repos", description: "Added by hand.", severity: "minor" }],
+          },
+        },
+      });
+    const runDeps = deletingMidCall(["c1", "c2", "c3"], addRule);
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
 });
 
 describe("rule suggestions API", () => {
@@ -695,6 +725,26 @@ describe("rule suggestions API", () => {
     expect(res.body.counts).toEqual({ pending: 1, approved: 0, discarded: 0 });
     expect(res.body.suggestions[0].rule).toEqual(RULE);
     expect(res.body.nextCursor).toBeNull();
+  });
+
+  it("leaves out a suggestion decided between picking the page and loading it", async () => {
+    const decided = await suggestion();
+    const original = prisma.$queryRaw.bind(prisma);
+    // Discard the row right after the page query has picked it.
+    const spy = vi.spyOn(prisma, "$queryRaw").mockImplementation((async (...args: Parameters<typeof prisma.$queryRaw>) => {
+      const rows = await original(...args);
+      if ((args[0] as unknown as string[]).join("?").includes("FROM rule_suggestions")) {
+        await prisma.ruleSuggestion.update({ where: { id: decided.id }, data: { status: "discarded", decidedAt: new Date() } });
+      }
+      return rows;
+    }) as typeof prisma.$queryRaw);
+    try {
+      const res = await request(app).get("/api/rule-suggestions?status=pending").set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      expect(res.body.suggestions).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("pages through more suggestions than fit in one list", async () => {

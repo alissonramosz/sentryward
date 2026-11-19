@@ -174,13 +174,14 @@ function rulesIn(settings: unknown): KnownRule[] {
   );
 }
 
-async function knownRules(workspaceId: string, globalSettings: unknown) {
+// Takes a client so the save can read the rules again inside its transaction.
+async function knownRules(db: Prisma.TransactionClient, workspaceId: string, globalSettings: unknown) {
   const [repos, pending, discarded] = await Promise.all([
-    prisma.repository.findMany({ where: { connection: { workspaceId } }, select: { settings: true, directories: true } }),
-    prisma.ruleSuggestion.findMany({ where: { workspaceId, status: "pending" }, select: { rule: true } }),
+    db.repository.findMany({ where: { connection: { workspaceId } }, select: { settings: true, directories: true } }),
+    db.ruleSuggestion.findMany({ where: { workspaceId, status: "pending" }, select: { rule: true } }),
     // Every discarded rule, not only those the prompt shows: the model may
     // ignore the prompt, and a discarded id must never come back.
-    prisma.ruleSuggestion.findMany({
+    db.ruleSuggestion.findMany({
       where: { workspaceId, status: "discarded" },
       select: { rule: true },
       orderBy: { decidedAt: "desc" },
@@ -239,13 +240,12 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
     workspaceName: workspace.name,
   }, guard);
 
-  const known = await knownRules(workspaceId, workspace.reviewSettings);
+  const known = await knownRules(prisma, workspaceId, workspace.reviewSettings);
   const { drafts, response } = await suggestRules(
     generate,
     { evidence, existingRules: known.existingRules, discarded: known.discarded },
     { ...config, llm: { ...config.llm, fallbackModels } },
   );
-  const { suggestions, dropped } = validateSuggestions(drafts, { evidence, takenIds: known.takenIds, minEvidence });
 
   const saved = await prisma.$transaction(async (tx) => {
     // The settings may have changed during the model call. Read them again
@@ -254,10 +254,24 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
     // comments and stripping excerpts, so either that waits for this
     // transaction and strips what it writes, or this sees the new settings and
     // the deletions. FOR KEY SHARE would not conflict with that update.
-    const [current] = await tx.$queryRaw<{ enabled: boolean }[]>`
-      SELECT rule_suggestions_enabled AS enabled FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
+    const [current] = await tx.$queryRaw<{ enabled: boolean; min_evidence: number; review_settings: unknown }[]>`
+      SELECT rule_suggestions_enabled AS enabled, rule_suggestions_min_evidence AS min_evidence, review_settings
+      FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
     `;
     if (!current?.enabled) return null;
+    // Validated here rather than before the transaction: a raised minimum, or
+    // a rule approved under the drafted id, may have landed during the model
+    // call. Saving settings, the global config and every approval (repository
+    // targets included) write or lock this row first, so they are either
+    // visible now or wait for this commit. A rule added by hand to a
+    // repository or folder is saved under the repository's lock only; like a
+    // `.sentryward.yaml` clash, approval refuses the taken id there.
+    const fresh = await knownRules(tx, workspaceId, current.review_settings);
+    const { suggestions, dropped } = validateSuggestions(drafts, {
+      evidence,
+      takenIds: fresh.takenIds,
+      minEvidence: current.min_evidence,
+    });
     // Every cited comment and dismissal may have gone during the model call:
     // an excluded reviewer's comments are deleted when the exclusion is saved,
     // retention deletes comments and findings, and a dismissal can be undone.
@@ -305,9 +319,10 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
       await tx.finding.updateMany({ where: { id: { in: findingIds }, suggestionId: null }, data: { suggestionId: created.id } });
       await tx.reviewComment.updateMany({ where: { id: { in: citedComments }, suggestionId: null }, data: { suggestionId: created.id } });
     }
-    return { created: kept.length, removed: suggestions.length - kept.length };
+    return { created: kept.length, removed: suggestions.length - kept.length, dropped };
   });
   if (!saved) return { workspaceId, outcome: "turned_off" };
+  const { dropped } = saved;
   if (saved.removed) dropped.evidence_removed = (dropped.evidence_removed ?? 0) + saved.removed;
   const droppedCount = Object.values(dropped).reduce((sum, count) => sum + (count ?? 0), 0);
   return { workspaceId, outcome: "suggested", created: saved.created, dropped: droppedCount };

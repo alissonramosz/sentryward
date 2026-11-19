@@ -49,9 +49,13 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   cites, so retention cannot delete one until the suggestion is stored, and
   drops any suggestion whose evidence is gone, no longer dismissed, or already
   past the workspace's retention cutoff, so no excerpt outlives what it quotes.
+  Drafts are validated under that same lock, against the evidence minimum and
+  the rule ids taken at that moment, so a minimum raised or a rule approved
+  under the drafted id while the model is answering drops the draft.
   The list (`GET /api/rule-suggestions`) is paged, 100 at a time, newest
   first: pass the returned `nextCursor` as `?cursor=` for the next page, and
-  the page offers **Load more**. Worker shutdown waits for a running suggestion pass before
+  the page offers **Load more**. A page holds only suggestions still in the
+  requested status; one decided while the page loads is left out. Worker shutdown waits for a running suggestion pass before
   disconnecting from the database.
   Removing a repository deletes its pending suggestions. The page leads with the suggestions: settings fold into a header showing
   whether learning is on, the last check and **Check now** (open by default only

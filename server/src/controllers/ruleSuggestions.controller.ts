@@ -58,9 +58,10 @@ export async function listRuleSuggestions(req: Request, res: Response) {
     suggestionCounts(workspaceId),
   ]);
   const ids = page.slice(0, LIST_LIMIT).map((row) => row.id);
-  const rows = await prisma.ruleSuggestion.findMany({ where: { id: { in: ids } }, select: suggestionSelect });
+  const rows = await prisma.ruleSuggestion.findMany({ where: { id: { in: ids }, workspaceId, status }, select: suggestionSelect });
   const byId = new Map(rows.map((row) => [row.id, row]));
-  // A row deleted between the two reads is simply left out.
+  // A row deleted or decided between the two reads is simply left out, so a
+  // page only ever holds suggestions in the status asked for.
   const suggestions = ids.flatMap((id) => byId.get(id) ?? []);
   const last = page[LIST_LIMIT - 1];
   const nextCursor = page.length > LIST_LIMIT && last ? `${last.at_micros}_${last.id}` : null;
