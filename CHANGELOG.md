@@ -20,7 +20,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   root's marker when the posted-comment record no longer names it) and
   excluded reviewers. The opt-in and exclusions are checked again under a lock
   on the workspace just before a comment is stored, so a comment arriving while
-  the feature is turned off is never kept.
+  the feature is turned off is never kept. The excluded-reviewers list
+  (`workspaces.rule_suggestions_excluded_reviewers`) is `NOT NULL`, so a
+  `NULL` written outside the app is refused instead of crashing comment
+  storage or the settings page.
   Once a week per workspace (or on **Check now**, at most hourly, counted from
   the request as well as the last run so a queued check cannot be requested
   again; `workspaces.rule_suggestions_requested_at`) the worker
