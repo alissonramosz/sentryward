@@ -14,13 +14,16 @@ import {
 } from "./schema.ts";
 import { atLeast } from "../core/severity.ts";
 
-export type LayerName = "default" | "profile" | "global" | "repoSettings" | "repoFile" | "trigger";
+export type LayerName = "default" | "profile" | "global" | "repoSettings" | "directory" | "repoFile" | "trigger";
 
 export interface ConfigLayers {
   // The owner's global config from the dashboard, validated on write.
   global?: DashboardOverride;
   // Saved in the dashboard, validated on write.
   repoSettings?: DashboardOverride;
+  // The settings of the one folder the change sits in (directories.ts), saved
+  // in the dashboard next to the repository settings.
+  directory?: DashboardOverride;
   // `.sentryward.yaml` from the base revision, already parsed.
   repoFile?: ConfigOverride;
   // A one-off override from whatever started the review.
@@ -47,6 +50,8 @@ export interface RuleIssue {
 }
 
 type Plain = Record<string, unknown>;
+
+const DASHBOARD_LAYERS = new Set<LayerName>(["global", "repoSettings", "directory"]);
 
 function isPlainObject(value: unknown): value is Plain {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -93,6 +98,7 @@ const LAYER_LABELS: Record<LayerName, string> = {
   profile: "the profile",
   global: "the global config",
   repoSettings: "the repository settings",
+  directory: "the folder settings",
   repoFile: "the repository file",
   trigger: "the trigger",
 };
@@ -138,19 +144,20 @@ function withoutRules<T extends ConfigOverride>(layer: T): T {
 }
 
 // Precedence, lowest first: defaults, profile preset, global config,
-// repository settings, repository file, trigger. The profile itself is chosen by the highest layer
+// repository settings, folder settings, repository file, trigger. The profile itself is chosen by the highest layer
 // that names one.
 export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
   const ordered: [LayerName, DashboardOverride | undefined][] = [
     ["global", layers.global],
     ["repoSettings", layers.repoSettings],
+    ["directory", layers.directory],
     ["repoFile", layers.repoFile],
     ["trigger", layers.trigger],
   ];
   // Only the dashboard layers may set endpoints.
   for (const [name, layer] of ordered) {
     if (!layer) continue;
-    if (name === "global" || name === "repoSettings") dashboardOverrideSchema.parse(layer);
+    if (DASHBOARD_LAYERS.has(name)) dashboardOverrideSchema.parse(layer);
     else configOverrideSchema.parse(layer);
   }
 
@@ -180,7 +187,6 @@ export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
   return { config, sources, warnings: ruleIssues.map((issue) => issue.message), ruleIssues };
 }
 
-const DASHBOARD_LAYERS = new Set<LayerName>(["global", "repoSettings"]);
 
 // Dashboard rules are held to the thresholds the dashboard layers resolve to
 // on their own, profile included, or to the effective ones where those are
@@ -190,7 +196,7 @@ function guardFor(layers: ConfigLayers, config: Config, sources: Record<string, 
   if (!layers.repoFile && !layers.trigger) return undefined;
   const ids = config.rules.filter((rule) => DASHBOARD_LAYERS.has(sources[`rules.${rule.id}`]!)).map((rule) => rule.id);
   if (!ids.length) return undefined;
-  const dashboard = resolveConfig({ global: layers.global, repoSettings: layers.repoSettings }).config;
+  const dashboard = resolveConfig({ global: layers.global, repoSettings: layers.repoSettings, directory: layers.directory }).config;
   const floor = config.review.severityFloor;
   return {
     ids,

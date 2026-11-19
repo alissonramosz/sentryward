@@ -2147,3 +2147,129 @@ describe("Display tab", { timeout: 20_000 }, () => {
     expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled()
   })
 })
+
+describe("folder settings", () => {
+  const repoConfig = (extra: Record<string, unknown> = {}) => ({ ref: "main", repoFile: null, directory: null, warnings: [], config: effective, sources: {}, ...extra })
+
+  it("adds a folder, opens it, and saves only that folder's settings", async () => {
+    let directories: { path: string; settings: Record<string, unknown> }[] = [{ path: "web", settings: {} }]
+    const requests: { method: string; body: unknown }[] = []
+    mockApi(
+      globalRoutes({
+        "GET /api/repos": () => jsonResponse(200, { repos: [repo("r1", "team/mono", { followGlobal: false, directories })] }),
+        "GET /api/repos/r1/config": repoConfig(),
+        "GET /api/repos/r1/config?directory=services%2Fbilling": repoConfig({
+          directory: "services/billing",
+          inherited: { config: effective, sources: {} },
+        }),
+        "POST /api/repos/r1/directories": (init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body))
+          requests.push({ method: "POST", body })
+          directories = [...directories, { path: body.path, settings: {} }]
+          return jsonResponse(201, { repo: repo("r1", "team/mono", { followGlobal: false, directories }) })
+        },
+        "PUT /api/repos/r1/directories": (init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body))
+          requests.push({ method: "PUT", body })
+          directories = directories.map((dir) => (dir.path === body.path ? body : dir))
+          return jsonResponse(200, { repo: repo("r1", "team/mono", { followGlobal: false, directories }) })
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?repo=r1&tab=files" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add folder" }))
+    const dialog = await screen.findByRole("dialog", { name: "Add a folder" })
+    const input = within(dialog).getByLabelText("Folder path")
+    // A folder inside another is refused before it reaches the server.
+    await userEvent.type(input, "web/app")
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add folder" }))
+    expect(within(dialog).getByText("web/app overlaps web; folders cannot be inside one another")).toBeInTheDocument()
+    expect(requests).toHaveLength(0)
+
+    await userEvent.clear(input)
+    await userEvent.type(input, "./services/billing/")
+    await userEvent.click(within(dialog).getByRole("button", { name: "Add folder" }))
+    await waitFor(() => expect(requests[0]).toEqual({ method: "POST", body: { path: "services/billing" } }))
+
+    expect(await screen.findByText(/Used for changes whose files are all inside/)).toBeInTheDocument()
+    await userEvent.type(await screen.findByLabelText("Max chunks"), "20")
+    await userEvent.click(screen.getByRole("button", { name: "Save settings" }))
+    await waitFor(() =>
+      expect(requests[1]).toEqual({ method: "PUT", body: { path: "services/billing", settings: { review: { maxChunks: 20 } } } }),
+    )
+  })
+
+  it("checks folder rules against the repository settings, not the repository file", async () => {
+    const rule = { id: "no-console", description: "No console.", severity: "minor" }
+    const routes = (inheritedRules: unknown[]) =>
+      globalRoutes({
+        "GET /api/repos": { repos: [repo("r1", "team/mono", { followGlobal: false, directories: [{ path: "web", settings: {} }] })] },
+        "GET /api/repos/r1/config": repoConfig(),
+        // The effective config holds the file's rule; what the folder inherits does not.
+        "GET /api/repos/r1/config?directory=web": repoConfig({
+          directory: "web",
+          repoFile: ".sentryward.yaml",
+          config: { ...effective, rules: [rule] },
+          sources: { "rules.no-console": "repoFile" },
+          inherited: { config: { ...effective, rules: inheritedRules }, sources: {} },
+        }),
+      })
+    const addRule = async () => {
+      await userEvent.click(await screen.findByRole("button", { name: "Add rule" }))
+      await userEvent.type(screen.getByLabelText("Rule 1 id"), "no-console")
+      await userEvent.type(screen.getByLabelText("Description"), "Folder rule.")
+      await userEvent.click(screen.getByRole("combobox", { name: "Severity" }))
+      await userEvent.click(screen.getByRole("option", { name: "minor" }))
+    }
+
+    mockApi(routes([]))
+    const first = renderWithProviders(<App />, { route: "/configuration?repo=r1&dir=web&tab=guidance" })
+    await addRule()
+    expect(screen.queryByText(/is already set in/)).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled()
+    first.unmount()
+
+    mockApi(routes([rule]))
+    renderWithProviders(<App />, { route: "/configuration?repo=r1&dir=web&tab=guidance" })
+    await addRule()
+    expect(await screen.findByText("Rule no-console is already set in the repository settings, which wins")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled()
+  })
+
+  it("removes a folder and returns to the repository's settings", async () => {
+    let directories = [{ path: "web", settings: { profile: "strict" } }]
+    let removed = false
+    mockApi(
+      globalRoutes({
+        "GET /api/repos": () => jsonResponse(200, { repos: [repo("r1", "team/mono", { followGlobal: false, directories })] }),
+        "GET /api/repos/r1/config": repoConfig(),
+        "GET /api/repos/r1/config?directory=web": repoConfig({ directory: "web", sources: { profile: "directory" } }),
+        "DELETE /api/repos/r1/directories?path=web": () => {
+          removed = true
+          directories = []
+          return jsonResponse(200, { repo: repo("r1", "team/mono", { followGlobal: false, directories }) })
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?repo=r1&dir=web" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Remove folder web" }))
+    await userEvent.click(within(await screen.findByRole("dialog", { name: "Remove web?" })).getByRole("button", { name: "Remove folder" }))
+
+    await waitFor(() => expect(removed).toBe(true))
+    expect(await screen.findByText(/Overrides saved here sit on top of the global config/)).toBeInTheDocument()
+  })
+
+  it("locks folders while the repository follows the global config", async () => {
+    mockApi(
+      globalRoutes({
+        "GET /api/repos": { repos: [repo("r1", "team/mono", { directories: [{ path: "web", settings: {} }] })] },
+        "GET /api/repos/r1/config": repoConfig(),
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?repo=r1" })
+
+    expect(await screen.findByRole("button", { name: "Add folder" })).toBeDisabled()
+  })
+})

@@ -10,6 +10,26 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Folder settings for monorepos. On the Review settings page a repository can
+  have folders (`repositories.directories`) with settings of their own, edited
+  like the repository's and inheriting from them. A review uses a folder only
+  when every file the change touches (ignored files aside) is inside it;
+  otherwise the repository settings apply. The folder layer sits between the
+  repository settings and `.sentryward.yaml`, can only add rules (held like
+  other dashboard rules), and is ignored while the repository follows the
+  global config. Folders cannot be inside one another. The folder a review
+  used is stored in `resolvedConfig.directory` and shown on the review page,
+  and replies to a finding follow it. Folders are added, saved and removed one
+  at a time (`POST`, `PUT` and `DELETE /api/repos/:id/directories`), merged
+  into the saved list under a row lock, so editing one folder never drops
+  another added since the page loaded, and only the folder being saved is
+  checked. Saving repository settings is refused when it would make a saved
+  folder's rules be ignored (a folder that was already broken is not held
+  against the save). `GET /api/repos/:id/config` takes `?directory=` (404 for a folder
+  that is not saved) and then also returns `inherited`, which the folder form
+  checks rules against. A webhook close cancels queued reviews only when the
+  repository and every folder keep `abort_on_close`, and a folder that
+  disables the cache gets fresh reads from the first one.
 - Monthly spend alerts. Workspace admins can set a monthly budget in USD
   (`workspaces.monthly_budget_usd`) under **Prices and budget** on the LLM
   Connections page (the tab was **Model prices**). It only notifies: reviews

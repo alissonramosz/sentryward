@@ -86,25 +86,30 @@ export async function runReply(
   // Settings come from the base revision, as for the review that posted the
   // finding, so the change's own commits cannot turn replies on.
   const head = await forge.getChangeHead(repo.fullPath, reply.number);
+  const finding = await prisma.finding.findUnique({
+    where: {
+      repositoryId_number_fingerprint: { repositoryId: repo.id, number: reply.number, fingerprint: reply.fingerprint },
+    },
+    include: { lastJob: { select: { result: true, resolvedConfig: true } } },
+  });
+  // The folder the finding's review used, so a folder that turns replies off
+  // is respected. Gone once retention trims the job, then the repository
+  // settings apply.
+  const directory = (finding?.lastJob?.resolvedConfig as { directory?: unknown } | null)?.directory;
   const { config } = await loadReviewConfig({
     adapter: forge,
     project: repo.fullPath,
     ref: head.baseSha,
     globalSettings: repo.connection.workspace.reviewSettings,
     repoSettings: repo.settings,
+    directories: repo.directories,
+    directory: typeof directory === "string" ? directory : null,
     followGlobal: repo.followGlobal,
   });
   if (!config.triggers.replies) {
     await finishReply(reply.id, { status: "skipped", error: "Replies are turned off for this repository" });
     return;
   }
-
-  const finding = await prisma.finding.findUnique({
-    where: {
-      repositoryId_number_fingerprint: { repositoryId: repo.id, number: reply.number, fingerprint: reply.fingerprint },
-    },
-    include: { lastJob: { select: { result: true } } },
-  });
 
   let text: string;
   let error: string | null = null;

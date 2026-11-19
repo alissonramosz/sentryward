@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { dashboardOverrideSchema } from "../review/config/schema.ts";
+import { dashboardOverrideSchema, directoryPathSchema } from "../review/config/schema.ts";
 
 // Without a connectionId, lists the added repositories of every connection.
 export const listReposQuerySchema = z.object({
@@ -24,7 +24,9 @@ export const enableRepoSchema = z.object({
 });
 
 // `settings` replaces the saved overrides as a whole; an empty object resets
-// the repository to the global config, its profile and the defaults.
+// the repository to the global config, its profile and the defaults. Folders
+// are changed one at a time through /directories instead, so two admins
+// editing different folders never overwrite each other.
 export const updateRepoSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -37,3 +39,14 @@ export const updateRepoSchema = z
   });
 
 export const repoIdParamSchema = z.object({ id: z.uuid() });
+
+// Which folder's effective config to show; none means the repository's.
+export const repoConfigQuerySchema = z.object({ directory: z.string().min(1).max(300).optional() });
+
+// A new folder starts with no settings of its own.
+export const addDirectorySchema = z.object({ path: directoryPathSchema });
+
+// `settings` replaces the folder's saved overrides as a whole.
+export const updateDirectorySchema = z.object({ path: directoryPathSchema, settings: dashboardOverrideSchema });
+
+export const directoryQuerySchema = z.object({ path: directoryPathSchema });

@@ -394,6 +394,22 @@ describe("cancelQueuedForClosedChange", () => {
     expect(await cancelling).toBe(1);
     expect(await prisma.reviewJob.findFirstOrThrow()).toMatchObject({ status: "cancelled" });
   });
+
+  it("leaves queued jobs to the worker when a folder keeps reviews of closed changes", async () => {
+    const repo = await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { followGlobal: false, directories: [{ path: "docs", settings: { triggers: { abortOnClose: false } } }] },
+    });
+    await prisma.reviewJob.create({ data: { repositoryId, number: 7, headSha: "aaa", trigger: "webhook" } });
+
+    // Without the change's files the folder is unknown, so nothing is cancelled.
+    expect(await cancelQueuedForClosedChange(repo, 7)).toBe(0);
+    expect(await prisma.reviewJob.findFirstOrThrow()).toMatchObject({ status: "queued" });
+
+    // While following the global config the folders do not apply.
+    const following = await prisma.repository.update({ where: { id: repositoryId }, data: { followGlobal: true } });
+    expect(await cancelQueuedForClosedChange(following, 7)).toBe(1);
+  });
 });
 
 describe("recoverStale", () => {

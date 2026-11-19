@@ -413,7 +413,10 @@ model Repository {
   // opposed to a user disabling it. Only these come back on their own.
   accessLostAt           DateTime?     @map("access_lost_at") @db.Timestamptz
   settings               Json          @default("{}")
-  // When set, `settings` is ignored and only the workspace's global config applies.
+  // Folders with settings of their own: [{ path, settings }], validated by
+  // directorySettingsSchema. A review uses at most one (review/config/directories.ts).
+  directories            Json          @default("[]")
+  // When set, `settings` and `directories` are ignored and only the workspace's global config applies.
   followGlobal           Boolean       @default(true) @map("follow_global")
   // Order an admin dragged the Repositories tab into. Null (never reordered,
   // or added since) sorts after by path, so adding a repository leaves it alone.

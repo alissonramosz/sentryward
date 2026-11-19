@@ -465,6 +465,10 @@ export function validateForm(
   savedConnections?: string[],
   patternErrors?: Record<string, string | null>,
   inheritedRules: Rule[] = [],
+  // Where the inherited rules come from, for the messages: a repository
+  // inherits the global config's, a folder the repository settings' (which
+  // already include the global rules).
+  inheritedFrom: "global" | "repoSettings" = "global",
 ): FormErrors {
   const errors: FormErrors = {}
   for (const spec of NUMBERS) {
@@ -521,10 +525,13 @@ export function validateForm(
   const combined = [...inheritedRules, ...rules]
   const inheritedIds = new Set(inheritedRules.map((rule) => rule.id))
   const clash = rules.find((rule) => inheritedIds.has(rule.id))
-  const withGlobal = inheritedRules.length ? `, together with the ${inheritedRules.length} global rules` : ""
+  const fromLabel = inheritedFrom === "global" ? "global config" : "repository settings"
+  const withGlobal = inheritedRules.length
+    ? `, together with the ${inheritedRules.length} ${inheritedFrom === "global" ? "global" : "inherited"} rules`
+    : ""
   if (ruleRowErrors(form.rules, patternErrors).some((row) => Object.keys(row).length > 0))
     errors.rules = "Fix the rules marked below"
-  else if (clash) errors.rules = `Rule ${clash.id} is already set in the global config, which wins`
+  else if (clash) errors.rules = `Rule ${clash.id} is already set in the ${fromLabel}, which wins`
   else if (combined.length > MAX_RULES) errors.rules = `At most ${MAX_RULES} rules${withGlobal}`
   else if (modelRuleChars(combined) > MAX_RULES_CHARS)
     errors.rules = `Rules without a pattern may hold at most ${MAX_RULES_CHARS} characters in total (ids, paths, descriptions and examples)${withGlobal}`

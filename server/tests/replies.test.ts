@@ -218,6 +218,25 @@ describe("runReply", () => {
     expect(await prisma.threadReply.findUnique({ where: { id: row.id } })).toMatchObject({ status: "skipped" });
   });
 
+  it("follows the folder the finding's review used", async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { followGlobal: false, directories: [{ path: "src", settings: { triggers: { replies: false } } }] },
+    });
+    const { runDeps, posted } = deps({ thread_answer: { answer: "Because." } });
+    const row = await reply();
+
+    // The review that raised the finding used the repository settings.
+    await runReply(row, runDeps);
+    expect(posted).toHaveLength(1);
+
+    await prisma.reviewJob.updateMany({ where: { repositoryId }, data: { resolvedConfig: { directory: "src" } } });
+    const second = await reply({ commentId: "702" });
+    await runReply(second, runDeps);
+    expect(posted).toHaveLength(1);
+    expect(await prisma.threadReply.findUnique({ where: { id: second.id } })).toMatchObject({ status: "skipped" });
+  });
+
   it("skips a reply queued before the repository was disabled", async () => {
     const { runDeps, posted } = deps();
     runDeps.adapterFor = () => {
