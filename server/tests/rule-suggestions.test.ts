@@ -517,6 +517,39 @@ describe("worker run", () => {
     expect(await prisma.ruleSuggestion.count()).toBe(0);
     log.mockRestore();
   });
+
+  // The settings are saved through the API while the model is answering, so
+  // the run persists after the save has deleted the comments it read.
+  function savingMidCall(body: object) {
+    const { model, runDeps } = deps(draft(["c1", "c2", "c3"]));
+    const generate: typeof model.generate = async (req) => {
+      const res = await request(app).put("/api/rule-suggestions/settings").set("Cookie", cookie).send(body);
+      expect(res.status).toBe(200);
+      return model.generate(req);
+    };
+    return { ...runDeps, generateFor: () => generate };
+  }
+
+  it("saves nothing when suggestions are turned off during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+
+    const runDeps = savingMidCall({ enabled: false, minEvidence: 3, excludedReviewers: [] });
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "turned_off" });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+    expect(await prisma.reviewComment.count()).toBe(0);
+  });
+
+  it("drops a suggestion citing comments of a reviewer excluded during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+
+    const runDeps = savingMidCall({ enabled: true, minEvidence: 3, excludedReviewers: ["alice"] });
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
 });
 
 describe("rule suggestions API", () => {

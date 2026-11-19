@@ -200,18 +200,24 @@ async function sweepBacklog(): Promise<void> {
 // drain outlasts them unless WORKER_SHUTDOWN_DRAIN_MS is set below that; a reply
 // still running at the deadline is cut off by the exit and falls to stale
 // recovery. Notification sends are waited for the same way (each is bounded by
-// its timeouts); one cut off is sent again after its lock goes stale.
+// its timeouts); one cut off is sent again after its lock goes stale. A
+// rule-suggestion run is waited for too (its model call is bounded by the
+// provider timeouts): the caller disconnects Prisma once drain returns, so it
+// must not still be writing. Cut off by the exit instead, it loses nothing: its
+// claim mark is already set and its uncommitted transaction rolls back.
 async function drain(): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), env.WORKER_SHUTDOWN_DRAIN_MS);
   });
-  const outcome = await Promise.race([Promise.allSettled([...running, ...deliveries, ...(suggesting ? [suggesting] : [])]), deadline]);
+  const pending = () => [...running, ...deliveries, ...(suggesting ? [suggesting] : [])];
+  const outcome = await Promise.race([Promise.allSettled(pending()), deadline]);
   clearTimeout(timer);
   if (outcome !== "timeout") return;
   if (inFlight.size === 0) {
-    // Only replies and sends left: nothing to hand back, so let them finish.
-    await Promise.allSettled([...running, ...deliveries]);
+    // Only replies, sends and a rule-suggestion run left: nothing to hand
+    // back, so let them finish.
+    await Promise.allSettled(pending());
     return;
   }
 

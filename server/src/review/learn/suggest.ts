@@ -122,7 +122,9 @@ export interface ValidSuggestion {
   repositoryId: string | null;
 }
 
-export type SuggestionDropReason = "invalid_rule" | "id_taken" | "unknown_evidence" | "too_little_evidence";
+// "evidence_removed" is set by the worker (worker/ruleSuggestions.ts), not
+// here: a cited comment deleted while the model was answering.
+export type SuggestionDropReason = "invalid_rule" | "id_taken" | "unknown_evidence" | "too_little_evidence" | "evidence_removed";
 
 export interface ValidationOutcome {
   suggestions: ValidSuggestion[];

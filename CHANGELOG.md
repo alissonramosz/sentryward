@@ -36,6 +36,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   Each excerpt expires by the age of the comment or dismissal it quotes, not
   the suggestion's, and the retention log counts excerpts trimmed for
   workspaces without a privacy period.
+  A run saves its suggestions only after re-reading the opt-in under the same
+  workspace lock, so turning the feature off or excluding a reviewer while the
+  model is answering never brings back deleted comments: a run turned off
+  mid-call saves nothing, and a suggestion citing a comment deleted meanwhile
+  is dropped. Worker shutdown waits for a running suggestion pass before
+  disconnecting from the database.
   Removing a repository deletes its pending suggestions. The page leads with the suggestions: settings fold into a header showing
   whether learning is on, the last check and **Check now** (open by default only
   while off). Cards carry the rule's severity colour, the rationale and a

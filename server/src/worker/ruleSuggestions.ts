@@ -38,7 +38,7 @@ const defaultDeps: RuleSuggestionDeps = {
 
 export type RunOutcome =
   | { workspaceId: string; outcome: "suggested"; created: number; dropped: number }
-  | { workspaceId: string; outcome: "not_enough_history" | "blocked" | "failed"; reason?: string };
+  | { workspaceId: string; outcome: "not_enough_history" | "blocked" | "failed" | "turned_off"; reason?: string };
 
 // Claims the workspace most overdue for a run and marks it run, in one
 // statement: SKIP LOCKED keeps two workers off the same workspace, and the
@@ -242,8 +242,28 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
   );
   const { suggestions, dropped } = validateSuggestions(drafts, { evidence, takenIds: known.takenIds, minEvidence });
 
-  await prisma.$transaction(async (tx) => {
-    for (const suggestion of suggestions) {
+  const saved = await prisma.$transaction(async (tx) => {
+    // The settings may have changed during the model call. Read them again
+    // under a share lock, as recordReviewComment does: turning suggestions off
+    // (or excluding a reviewer) updates this row before deleting stored
+    // comments and stripping excerpts, so either that waits for this
+    // transaction and strips what it writes, or this sees the new settings and
+    // the deletions. FOR KEY SHARE would not conflict with that update.
+    const [current] = await tx.$queryRaw<{ enabled: boolean }[]>`
+      SELECT rule_suggestions_enabled AS enabled FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
+    `;
+    if (!current?.enabled) return null;
+    // An excluded reviewer's comments are deleted when the exclusion is saved,
+    // so a comment that still exists may still be quoted. A suggestion citing
+    // one that is gone is dropped whole: its evidence no longer stands.
+    const commentIds = suggestions.flatMap((s) => s.evidence.filter((item) => item.kind === "comment").map((item) => item.id));
+    const remaining = new Set(
+      commentIds.length
+        ? (await tx.reviewComment.findMany({ where: { id: { in: commentIds } }, select: { id: true } })).map((row) => row.id)
+        : [],
+    );
+    const kept = suggestions.filter((s) => s.evidence.every((item) => item.kind !== "comment" || remaining.has(item.id)));
+    for (const suggestion of kept) {
       const created = await tx.ruleSuggestion.create({
         data: {
           workspaceId,
@@ -256,11 +276,14 @@ export async function suggestForWorkspace(workspaceId: string, now: Date, deps: 
       });
       // Only rows still uncited: each item backs one suggestion at most.
       const findingIds = suggestion.evidence.filter((item) => item.kind === "dismissal").map((item) => item.id);
-      const commentIds = suggestion.evidence.filter((item) => item.kind === "comment").map((item) => item.id);
+      const citedComments = suggestion.evidence.filter((item) => item.kind === "comment").map((item) => item.id);
       await tx.finding.updateMany({ where: { id: { in: findingIds }, suggestionId: null }, data: { suggestionId: created.id } });
-      await tx.reviewComment.updateMany({ where: { id: { in: commentIds }, suggestionId: null }, data: { suggestionId: created.id } });
+      await tx.reviewComment.updateMany({ where: { id: { in: citedComments }, suggestionId: null }, data: { suggestionId: created.id } });
     }
+    return { created: kept.length, removed: suggestions.length - kept.length };
   });
+  if (!saved) return { workspaceId, outcome: "turned_off" };
+  if (saved.removed) dropped.evidence_removed = (dropped.evidence_removed ?? 0) + saved.removed;
   const droppedCount = Object.values(dropped).reduce((sum, count) => sum + (count ?? 0), 0);
-  return { workspaceId, outcome: "suggested", created: suggestions.length, dropped: droppedCount };
+  return { workspaceId, outcome: "suggested", created: saved.created, dropped: droppedCount };
 }
