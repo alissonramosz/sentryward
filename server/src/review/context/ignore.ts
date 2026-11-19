@@ -6,11 +6,18 @@ export interface Classified {
   omissions: Omission[];
 }
 
+// True for a path the ignore list leaves out. Shared with folder selection
+// (config/directories.ts), so both agree on which files a review skips. picomatch
+// refuses an empty list, so "\0" (which no path contains) stands in for none.
+export function ignoreMatcher(ignorePaths: string[]): (path: string) => boolean {
+  return picomatch(ignorePaths.length ? ignorePaths : ["\0"], { dot: true });
+}
+
 // Splits the change into what the model will see and what it will not, with a
 // reason for every file left out. Nothing is skipped silently except a pure
 // rename, which has no content to review.
 export function classifyFiles(files: ChangedFile[], ignorePaths: string[]): Classified {
-  const ignored = picomatch(ignorePaths.length ? ignorePaths : ["\0"], { dot: true });
+  const ignored = ignoreMatcher(ignorePaths);
   const reviewable: ChangedFile[] = [];
   const omissions: Omission[] = [];
 

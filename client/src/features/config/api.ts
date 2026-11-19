@@ -230,6 +230,9 @@ export interface ResolvedConfig {
   warnings: string[]
   sources: Record<string, string>
   config: EffectiveConfig
+  // With a folder: what it inherits (global config and repository settings,
+  // without the repository file, which sits above the folder).
+  inherited?: { config: EffectiveConfig; sources: Record<string, string> }
 }
 
 // The saved global config and what it resolves to before any repository.
@@ -291,17 +294,35 @@ export function useRepoConfig(repoId: string | null, directory?: string) {
   })
 }
 
-// Folders are saved as one list, as the server replaces it whole.
-export function useSaveRepoDirectories() {
+// Each folder is added, saved or removed on its own; the server merges the
+// change into the saved list, so a stale page cannot drop another folder.
+function useDirectoryMutation<T extends { repoId: string }>(request: (vars: T) => Promise<{ repo: SavedRepo }>) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ repoId, directories }: { repoId: string; directories: DirectorySetting[] }) =>
-      api<{ repo: SavedRepo }>(`/repos/${repoId}`, { method: "PATCH", body: JSON.stringify({ directories }) }),
+    mutationFn: request,
     onSuccess: (_data, { repoId }) => {
       queryClient.invalidateQueries({ queryKey: ["repos"] })
       queryClient.invalidateQueries({ queryKey: ["repo-config", repoId] })
     },
   })
+}
+
+export function useAddDirectory() {
+  return useDirectoryMutation(({ repoId, path }: { repoId: string; path: string }) =>
+    api<{ repo: SavedRepo }>(`/repos/${repoId}/directories`, { method: "POST", body: JSON.stringify({ path }) }),
+  )
+}
+
+export function useSaveDirectory() {
+  return useDirectoryMutation(({ repoId, path, settings }: { repoId: string } & DirectorySetting) =>
+    api<{ repo: SavedRepo }>(`/repos/${repoId}/directories`, { method: "PUT", body: JSON.stringify({ path, settings }) }),
+  )
+}
+
+export function useRemoveDirectory() {
+  return useDirectoryMutation(({ repoId, path }: { repoId: string; path: string }) =>
+    api<{ repo: SavedRepo }>(`/repos/${repoId}/directories?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  )
 }
 
 export function useSaveRepoSettings() {

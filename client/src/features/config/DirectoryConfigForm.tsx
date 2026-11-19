@@ -19,15 +19,19 @@ import { useUnsavedChanges } from "@/hooks/use-unsaved-changes"
 import { ApiError } from "@/lib/api"
 import type { DirectorySetting, ForgeRepo } from "@/features/forge/api"
 import { useApiKeys } from "@/features/llm-connections/api"
-import { useRepoConfig, useRulePatternErrors, useSaveRepoDirectories } from "./api"
+import { useAddDirectory, useRemoveDirectory, useRepoConfig, useRulePatternErrors, useSaveDirectory } from "./api"
 import { ConfigFields } from "./ConfigFields"
 import { SaveBar } from "./SaveBar"
 import type { ConfigTab } from "./tabs"
 import { directoriesOf, directoryError, normalizeDirectory } from "./directories"
 import { isDirty, toForm, toSettings, validateForm, type FormState } from "./settingsForm"
 
+// The server puts a folder path problem under `directories`, and settings
+// problems (rules checked against what is saved now, a connection removed
+// since the page loaded) under the field they concern.
 function serverError(err: unknown, fallback: string) {
-  const fieldError = err instanceof ApiError ? err.fieldErrors?.directories?.[0] : undefined
+  const fields = err instanceof ApiError ? err.fieldErrors : undefined
+  const fieldError = fields?.directories?.[0] ?? fields?.rules?.[0] ?? fields?.connection?.[0]
   return fieldError ?? (err instanceof Error ? err.message : fallback)
 }
 
@@ -38,7 +42,7 @@ export function AddDirectoryDialog(props: {
   onOpenChange: (open: boolean) => void
   onAdded: (path: string) => void
 }) {
-  const save = useSaveRepoDirectories()
+  const save = useAddDirectory()
   const [value, setValue] = useState("")
   const [touched, setTouched] = useState(false)
   const existing = directoriesOf(props.repo)
@@ -53,7 +57,7 @@ export function AddDirectoryDialog(props: {
     setTouched(true)
     if (error) return
     try {
-      await save.mutateAsync({ repoId: props.repo.id, directories: [...existing, { path, settings: {} }] })
+      await save.mutateAsync({ repoId: props.repo.id, path })
       setValue("")
       setTouched(false)
       props.onOpenChange(false)
@@ -112,14 +116,11 @@ export function RemoveDirectoryDialog(props: {
   onOpenChange: (open: boolean) => void
   onRemoved: () => void
 }) {
-  const save = useSaveRepoDirectories()
+  const save = useRemoveDirectory()
 
   async function onRemove() {
     try {
-      await save.mutateAsync({
-        repoId: props.repo.id,
-        directories: directoriesOf(props.repo).filter((dir) => dir.path !== props.path),
-      })
+      await save.mutateAsync({ repoId: props.repo.id, path: props.path })
       props.onOpenChange(false)
       props.onRemoved()
     } catch (err) {
@@ -162,9 +163,11 @@ export function DirectoryConfigForm(props: {
   profileSlot?: HTMLElement | null
 }) {
   const { repo, directory } = props
+  // Also carries what the folder inherits: the repository settings over the
+  // global config, without the repository file, which sits above the folder.
   const resolved = useRepoConfig(repo.id, directory.path)
-  const parent = useRepoConfig(repo.id)
-  const save = useSaveRepoDirectories()
+  const inherited = resolved.data?.inherited
+  const save = useSaveDirectory()
   const apiKeys = useApiKeys()
   const [form, setForm] = useState<FormState>(() => toForm(directory.settings))
   const dirty = isDirty(directory.settings, form) && !repo.followGlobal
@@ -175,17 +178,15 @@ export function DirectoryConfigForm(props: {
     false,
     apiKeys.data?.keys.filter((key) => key.stored).map((key) => key.provider),
     patternErrors,
-    parent.data?.config.rules,
+    inherited?.config.rules,
+    "repoSettings",
   )
   const valid = Object.keys(errors).length === 0
 
   async function onSave() {
     const settings = toSettings(directory.settings, form)
     try {
-      await save.mutateAsync({
-        repoId: repo.id,
-        directories: directoriesOf(repo).map((dir) => (dir.path === directory.path ? { path: dir.path, settings } : dir)),
-      })
+      await save.mutateAsync({ repoId: repo.id, path: directory.path, settings })
       toast.success("Settings saved")
     } catch (err) {
       toast.error(serverError(err, "Could not save settings"))
@@ -234,8 +235,8 @@ export function DirectoryConfigForm(props: {
         profileSlot={props.profileSlot}
         config={resolved.data?.config}
         sources={resolved.data?.sources}
-        inherited={parent.data?.config}
-        inheritedSources={parent.data?.sources}
+        inherited={inherited?.config}
+        inheritedSources={inherited?.sources}
         repoFile={resolved.data?.repoFile}
         errors={errors}
         rulePatternErrors={patternErrors}

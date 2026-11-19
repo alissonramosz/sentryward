@@ -3,7 +3,7 @@ import { lockChange } from "../lib/changeLock.ts";
 import { FORGE_TIMEOUT_MS } from "../review/forge/http.ts";
 import { prisma } from "../lib/prisma.ts";
 import type { Prisma, Repository, ReviewJob, ReviewTrigger } from "../generated/prisma/client.ts";
-import { loadDashboardConfig } from "../review/config/load.ts";
+import { loadDashboardConfigs } from "../review/config/load.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 import { normalizeFocus, type ReviewProgress } from "../review/core/models.ts";
 
@@ -255,22 +255,26 @@ const UNREVIEWED_CANCEL_REASONS = [...OFF_REASONS, CLOSED_REASON];
 
 // A closed or merged change needs no review, so its queued jobs are
 // cancelled when the forge reports the close, unless the dashboard settings
-// turned that off. A running job is left to the worker, which checks the change
-// itself with the full configuration, repository file included.
+// turned that off. Which folder applies depends on the change's files, which
+// this does not fetch, so it cancels only when the repository and every folder
+// agree; otherwise the worker decides once it knows the folder. A running job
+// is left to the worker too, which checks the change itself with the full
+// configuration, folder and repository file included.
 export async function cancelQueuedForClosedChange(
-  repo: Pick<Repository, "id" | "settings" | "followGlobal" | "connectionId">,
+  repo: Pick<Repository, "id" | "settings" | "directories" | "followGlobal" | "connectionId">,
   number: number,
 ): Promise<number> {
   const owner = await prisma.forgeConnection.findUnique({
     where: { id: repo.connectionId },
     select: { workspace: { select: { reviewSettings: true } } },
   });
-  const config = loadDashboardConfig({
+  const configs = loadDashboardConfigs({
     globalSettings: owner?.workspace.reviewSettings,
     repoSettings: repo.settings,
+    directories: repo.directories,
     followGlobal: repo.followGlobal,
   });
-  if (!config.triggers.abortOnClose) return 0;
+  if (!configs.every((config) => config.triggers.abortOnClose)) return 0;
   // Under the change's lock, so a push being queued at the same moment commits
   // first and is cancelled too. The worker re-checks the change before
   // reviewing anyway; this spares it a claim and a forge call.

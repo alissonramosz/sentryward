@@ -19,8 +19,15 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   other dashboard rules), and is ignored while the repository follows the
   global config. Folders cannot be inside one another. The folder a review
   used is stored in `resolvedConfig.directory` and shown on the review page,
-  and replies to a finding follow it. `PATCH /api/repos/:id` accepts
-  `directories` and `GET /api/repos/:id/config` takes `?directory=`.
+  and replies to a finding follow it. Folders are added, saved and removed one
+  at a time (`POST`, `PUT` and `DELETE /api/repos/:id/directories`), merged
+  into the saved list under a row lock, so editing one folder never drops
+  another added since the page loaded, and only the folder being saved is
+  checked. `GET /api/repos/:id/config` takes `?directory=` (404 for a folder
+  that is not saved) and then also returns `inherited`, which the folder form
+  checks rules against. A webhook close cancels queued reviews only when the
+  repository and every folder keep `abort_on_close`, and a folder that
+  disables the cache gets fresh reads from the first one.
 - Monthly spend alerts. Workspace admins can set a monthly budget in USD
   (`workspaces.monthly_budget_usd`) under **Prices and budget** on the LLM
   Connections page (the tab was **Model prices**). It only notifies: reviews

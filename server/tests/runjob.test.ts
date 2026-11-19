@@ -121,6 +121,9 @@ function deps(
     // The head getChange reports, and the change's files.
     head?: string;
     files?: FileDiffInput[];
+    // The files an uncached getChange reports instead, as when the change
+    // moved on since the cached read.
+    freshFiles?: FileDiffInput[];
     // What compareCommits answers; recorded as "compare:<from>..<to>".
     compare?: string[] | null | Error;
     // What getToolAnnotations answers; each call is recorded in toolReads.
@@ -139,7 +142,7 @@ function deps(
     getChange: async (_p: string, _n: number, cache?: ForgeCache) => {
       reads.push(cache ? "change:cached" : "change");
       if (options.changeError) throw options.changeError;
-      const change = makeChangeSet(options.files);
+      const change = makeChangeSet(!cache && options.freshFiles ? options.freshFiles : options.files);
       return {
         ...change,
         title: options.title ?? change.title,
@@ -1327,6 +1330,45 @@ describe("runJob issues and cache", () => {
     await runJob(third, none.runDeps);
     expect(none.reads.filter((read) => read.startsWith("change"))).toEqual(["change"]);
     expect(none.reads.filter((read) => read.startsWith("newhead:"))).toEqual(["newhead:src/app.ts"]);
+  });
+
+  it("reads fresh from the start when a folder disables the cache", async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { directories: [{ path: "lib", settings: { review: { disableCache: true } } }] },
+    });
+    const run = deps({}, { code_review: { findings: [] }, walkthrough: WALKTHROUGH }, undefined, { cache: new ForgeCache() });
+    await runJob(await claimedJob(), run.runDeps);
+    // The folder is not known before the change is read, so any folder that
+    // turns the cache off keeps the first read fresh.
+    expect(run.reads.filter((read) => read.startsWith("change"))).toEqual(["change"]);
+  });
+
+  it("picks the folder again from the fresh change after the repository file disables the cache", async () => {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { directories: [{ path: "src", settings: { review: { blockOn: "critical" } } }] },
+    });
+    const job = await claimedJob();
+    const run = deps(
+      { "base:.sentryward.yaml": "review:\n  disable_cache: true\n" },
+      { code_review: { findings: [] }, walkthrough: WALKTHROUGH },
+      undefined,
+      {
+        cache: new ForgeCache(),
+        freshFiles: [
+          { path: "src/app.ts", changeType: "modified", patch: APP_PATCH },
+          { path: "README.md", changeType: "modified", patch: "@@ -1 +1 @@\n-a\n+b\n" },
+        ],
+      },
+    );
+
+    await runJob(job, run.runDeps);
+
+    expect(run.reads.filter((read) => read.startsWith("change"))).toEqual(["change:cached", "change"]);
+    // The cached read held only src/ files; the fresh one also touches the root.
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.resolvedConfig).toMatchObject({ directory: null });
   });
 });
 

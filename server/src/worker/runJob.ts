@@ -2,7 +2,7 @@ import { env } from "../config/env.ts";
 import type { ForgeConnection, IgnoreReason, ReviewJob } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
 import { skipReason, walkthroughEnabled } from "../review/config/filters.ts";
-import { loadDashboardConfig, loadReviewConfig } from "../review/config/load.ts";
+import { loadDashboardConfigs, loadReviewConfig } from "../review/config/load.ts";
 import type { Config } from "../review/config/schema.ts";
 import type { ChangeSet, RejectedFinding, ToolAnnotation } from "../review/core/models.ts";
 import { priceUsage } from "../review/core/pricing/pricing.ts";
@@ -206,12 +206,14 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     followGlobal: repo.followGlobal,
   };
   // The repository file can only be read once the change is known, so the
-  // first reads go by the dashboard settings alone.
+  // first reads go by the dashboard settings alone. The folder is not known
+  // either (it depends on the files), so any folder that asks for fresh reads
+  // gets them.
   const cacheFor = (disabled: boolean) => (disabled ? undefined : deps.cache);
-  const savedDisablesCache = loadDashboardConfig(saved).review.disableCache;
+  const savedDisablesCache = loadDashboardConfigs(saved).some((config) => config.review.disableCache);
   // The PR may have moved since the job was queued; review what is there now
   // and record which head that was.
-  let changeSet;
+  let changeSet: ChangeSet;
   try {
     changeSet = await forge.getChange(repo.fullPath, job.number, cacheFor(savedDisablesCache));
   } catch (err) {
@@ -231,21 +233,25 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   // Stored now, not with the result, so a run that is skipped, cancelled or
   // fails from here on can still be found by the change's title.
   await recordTitle(job.id, changeSet.title, changeSet.authorId);
-  const loaded = await loadReviewConfig({
-    adapter: forge,
-    project: repo.fullPath,
-    ref: changeSet.forgeRef.baseSha,
-    ...saved,
-    changedFiles: changeSet.files,
-    cache: cacheFor(savedDisablesCache),
-  });
-
-  const { config } = loaded;
+  const loadConfig = () =>
+    loadReviewConfig({
+      adapter: forge,
+      project: repo.fullPath,
+      ref: changeSet.forgeRef.baseSha,
+      ...saved,
+      changedFiles: changeSet.files,
+      cache: cacheFor(savedDisablesCache),
+    });
+  let loaded = await loadConfig();
   // The repository file asked for fresh reads after a cached one was used.
-  if (config.review.disableCache && !savedDisablesCache && deps.cache) {
+  // The folder was picked from the cached file list, so it is picked again
+  // from the fresh one.
+  if (loaded.config.review.disableCache && !savedDisablesCache && deps.cache) {
     changeSet = await forge.getChange(repo.fullPath, job.number);
     await recordTitle(job.id, changeSet.title, changeSet.authorId);
+    loaded = await loadConfig();
   }
+  const { config } = loaded;
   const skip = skipReason(job, config, changeSet);
   if (skip) {
     await complete(job.id, job.attempts, {

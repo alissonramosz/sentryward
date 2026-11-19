@@ -76,8 +76,26 @@ function savedLayers(input: SavedSettings, warnings: string[]) {
 // cancel a review without a forge call. No folder applies yet: which one
 // depends on the change's files.
 export function loadDashboardConfig(input: SavedSettings): Config {
+  return resolveDashboardLayers(input).config;
+}
+
+// The repository-level config plus one per saved folder, for those same
+// early decisions: the folder is not known yet, so a choice that must hold
+// for whichever one applies has to hold for all of them.
+export function loadDashboardConfigs(input: SavedSettings): Config[] {
+  const { global, repoSettings, directories } = savedLayers(input, []);
+  return [
+    resolveConfig({ global, repoSettings }).config,
+    ...directories.map((dir) => resolveConfig({ global, repoSettings, directory: dir.settings }).config),
+  ];
+}
+
+// What a folder inherits: the global config and repository settings only. The
+// repository file sits above the folder layer, so its values (and rules) are
+// not something a folder can inherit or clash with.
+export function resolveDashboardLayers(input: SavedSettings): ResolvedConfig {
   const { global, repoSettings } = savedLayers(input, []);
-  return resolveConfig({ global, repoSettings }).config;
+  return resolveConfig({ global, repoSettings });
 }
 
 // Rules a repository's own settings, or one of its folders, could not add on
@@ -118,12 +136,17 @@ export async function loadReviewConfig(input: LoadConfigInput): Promise<LoadedCo
 
   const layers = { global, repoSettings, repoFile: fileOverride, trigger: input.trigger };
   let directory: DirectorySetting | null = null;
+  // Resolved once without a folder: that is the answer when none applies, and
+  // its ignore list decides which files count when picking one.
+  let resolved: ResolvedConfig | undefined;
   if (input.directory) {
     const name = normalizeDirectory(input.directory);
     directory = directories.find((dir) => dir.path === name) ?? null;
-  } else if (input.changedFiles) {
-    directory = pickDirectory(directories, input.changedFiles, resolveConfig(layers).config.ignorePaths);
+  } else if (input.changedFiles && directories.length) {
+    resolved = resolveConfig(layers);
+    directory = pickDirectory(directories, input.changedFiles, resolved.config.ignorePaths);
   }
-  const resolved = resolveConfig({ ...layers, directory: directory?.settings });
+  if (directory) resolved = resolveConfig({ ...layers, directory: directory.settings });
+  resolved ??= resolveConfig(layers);
   return { ...resolved, repoFile, directory: directory?.path ?? null, warnings: [...warnings, ...resolved.warnings] };
 }

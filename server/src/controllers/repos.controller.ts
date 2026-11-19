@@ -3,19 +3,23 @@ import { Prisma, type ReviewStatus, type ReviewVerdict } from "../generated/pris
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { dropRepositoriesFromTargets } from "../services/notifications.ts";
-import { loadReviewConfig, repoSettingsRuleIssues } from "../review/config/load.ts";
+import { loadReviewConfig, repoSettingsRuleIssues, resolveDashboardLayers } from "../review/config/load.ts";
+import { directorySettingsSchema, normalizeDirectory, type DashboardOverride, type DirectorySetting } from "../review/config/schema.ts";
 import { hostOrigin } from "../review/forge/types.ts";
 import { adapterForConnection, loadWorkspaceConnection, toHttpError } from "../services/forge.ts";
 import { requireStoredLlmConnection } from "../services/llm.ts";
 import { ensureWebhook, removeWebhook } from "../services/webhooks.ts";
 import { cancelForDisabledRepositories, DISABLED_REASON } from "../worker/queue.ts";
 import {
+  addDirectorySchema,
   availableReposQuerySchema,
+  directoryQuerySchema,
   enableRepoSchema,
   listReposQuerySchema,
   reorderReposSchema,
   repoConfigQuerySchema,
   repoIdParamSchema,
+  updateDirectorySchema,
   updateRepoSchema,
 } from "../schemas/repos.schema.ts";
 
@@ -193,40 +197,19 @@ async function loadOwnedRepo(workspaceId: string, id: string) {
 
 export async function updateRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
-  const { enabled, settings, directories, followGlobal } = updateRepoSchema.parse(req.body);
+  const { enabled, settings, followGlobal } = updateRepoSchema.parse(req.body);
   const existing = await loadOwnedRepo(req.workspaceId!, id);
 
-  if (settings?.llm && "connection" in settings.llm) {
-    if (!settings.llm.connection) {
-      throw new HttpError(400, "Validation failed", { connection: ["Select an LLM connection"] });
-    }
-    await requireStoredLlmConnection(req.workspaceId!, settings.llm.connection);
-  }
-  for (const dir of directories ?? []) {
-    if (!dir.settings.llm || !("connection" in dir.settings.llm)) continue;
-    if (!dir.settings.llm.connection) {
-      throw new HttpError(400, "Validation failed", { directories: [`${dir.path}: Select an LLM connection`] });
-    }
-    await requireStoredLlmConnection(req.workspaceId!, dir.settings.llm.connection);
-  }
-  // Each part is checked only when it is saved: rules a later change below
-  // leaves out are reported as review warnings, as for the global config.
-  const folderRules = directories?.some((dir) => dir.settings.rules?.length);
-  if (settings?.rules?.length || folderRules) {
+  await requireSettingsConnection(req.workspaceId!, settings);
+  // Only the repository settings are checked here: folder rules a change to
+  // them leaves out are reported as review warnings, as for the global config.
+  if (settings?.rules?.length) {
     const issues = repoSettingsRuleIssues({
       globalSettings: existing.connection.workspace.reviewSettings,
-      repoSettings: settings ?? existing.settings,
-      directories: directories ?? existing.directories,
+      repoSettings: settings,
       followGlobal: followGlobal ?? existing.followGlobal,
     });
-    const repoIssues = settings?.rules?.length ? issues.filter((issue) => issue.directory === undefined) : [];
-    const dirIssues = folderRules ? issues.filter((issue) => issue.directory !== undefined) : [];
-    if (repoIssues.length || dirIssues.length) {
-      throw new HttpError(400, "Validation failed", {
-        ...(repoIssues.length ? { rules: repoIssues.map((issue) => issue.message) } : {}),
-        ...(dirIssues.length ? { directories: dirIssues.map((issue) => issue.message) } : {}),
-      });
-    }
+    if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
   }
 
   // Turning a repository on or off by hand overrides any access-loss marker,
@@ -237,7 +220,7 @@ export async function updateRepo(req: Request, res: Response) {
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.repository.update({
       where: { id },
-      data: { enabled, settings, directories, followGlobal, accessLostAt },
+      data: { enabled, settings, followGlobal, accessLostAt },
     });
     if (enabled === false) await cancelForDisabledRepositories([id], DISABLED_REASON, tx);
     return row;
@@ -247,6 +230,92 @@ export async function updateRepo(req: Request, res: Response) {
   if (enabled === false) await removeWebhook(updated, existing.connection);
   const repo = await prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
   res.json({ repo, ...(webhook ? { webhook } : {}) });
+}
+
+// A chosen LLM connection must be one the workspace has stored.
+async function requireSettingsConnection(workspaceId: string, settings: DashboardOverride | undefined) {
+  if (!settings?.llm || !("connection" in settings.llm)) return;
+  if (!settings.llm.connection) {
+    throw new HttpError(400, "Validation failed", { connection: ["Select an LLM connection"] });
+  }
+  await requireStoredLlmConnection(workspaceId, settings.llm.connection);
+}
+
+// Folders are changed one at a time, merged into the saved list under the
+// repository's row lock, so two admins editing different folders (or two tabs)
+// never overwrite each other with a stale copy of the whole list. `change`
+// returns the new list and, when the saved folder has rules, its path: only
+// that folder's rules are checked, so a folder that went stale since it was
+// saved does not block edits to the others.
+async function changeDirectories(
+  workspaceId: string,
+  id: string,
+  change: (dirs: DirectorySetting[]) => { dirs: DirectorySetting[]; checkRules?: string },
+) {
+  const existing = await loadOwnedRepo(workspaceId, id);
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+    const row = await tx.repository.findUniqueOrThrow({
+      where: { id },
+      select: { settings: true, directories: true, followGlobal: true },
+    });
+    const current = directorySettingsSchema.safeParse(row.directories);
+    if (!current.success) {
+      throw new HttpError(409, "Saved folder settings are no longer valid; remove the repository's folders and add them again");
+    }
+    const { dirs, checkRules } = change(current.data);
+    const parsed = directorySettingsSchema.safeParse(dirs);
+    if (!parsed.success) {
+      throw new HttpError(400, "Validation failed", { directories: parsed.error.issues.map((issue) => issue.message) });
+    }
+    if (checkRules !== undefined) {
+      const index = parsed.data.findIndex((dir) => dir.path === checkRules);
+      const issues = repoSettingsRuleIssues({
+        globalSettings: existing.connection.workspace.reviewSettings,
+        repoSettings: row.settings,
+        directories: parsed.data,
+        followGlobal: row.followGlobal,
+      }).filter((issue) => issue.directory === index);
+      if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
+    }
+    await tx.repository.update({ where: { id }, data: { directories: parsed.data } });
+  });
+  return prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
+}
+
+function requireDirectory(dirs: DirectorySetting[], path: string) {
+  if (!dirs.some((dir) => dir.path === path)) throw new HttpError(404, "Folder not found");
+}
+
+export async function addDirectory(req: Request, res: Response) {
+  const { id } = repoIdParamSchema.parse(req.params);
+  const { path } = addDirectorySchema.parse(req.body);
+  const repo = await changeDirectories(req.workspaceId!, id, (dirs) => ({ dirs: [...dirs, { path, settings: {} }] }));
+  res.status(201).json({ repo });
+}
+
+export async function updateDirectory(req: Request, res: Response) {
+  const { id } = repoIdParamSchema.parse(req.params);
+  const { path, settings } = updateDirectorySchema.parse(req.body);
+  await requireSettingsConnection(req.workspaceId!, settings);
+  const repo = await changeDirectories(req.workspaceId!, id, (dirs) => {
+    requireDirectory(dirs, path);
+    return {
+      dirs: dirs.map((dir) => (dir.path === path ? { path, settings } : dir)),
+      checkRules: settings.rules?.length ? path : undefined,
+    };
+  });
+  res.json({ repo });
+}
+
+export async function removeDirectory(req: Request, res: Response) {
+  const { id } = repoIdParamSchema.parse(req.params);
+  const { path } = directoryQuerySchema.parse(req.query);
+  const repo = await changeDirectories(req.workspaceId!, id, (dirs) => {
+    requireDirectory(dirs, path);
+    return { dirs: dirs.filter((dir) => dir.path !== path) };
+  });
+  res.json({ repo });
 }
 
 // Review jobs and posted findings go with it (cascade), so re-adding the
@@ -283,10 +352,29 @@ export async function getRepoConfig(req: Request, res: Response) {
   }).catch((err: unknown) => {
     throw toHttpError(err, repo.provider);
   });
-  // A folder that is not saved (or is ignored while following the global
-  // config) would silently show the repository's config instead.
-  if (directory && !loaded.directory && !repo.followGlobal) throw new HttpError(404, "Folder not found");
-  res.json({ ref: repo.defaultBranch, ...loaded });
+  // A folder for which the saved list has no entry would otherwise silently
+  // show the repository's config. One that exists while the repository
+  // follows the global config is ignored by reviews, so `directory` is null.
+  if (directory) {
+    const saved = directorySettingsSchema.safeParse(repo.directories);
+    const name = normalizeDirectory(directory);
+    if (!saved.success || !saved.data.some((dir) => dir.path === name)) throw new HttpError(404, "Folder not found");
+  }
+  // What the folder inherits, without the repository file (which sits above
+  // it), so the folder form checks rules and shows Inherit values as a review
+  // would resolve them.
+  const inherited = directory
+    ? resolveDashboardLayers({
+        globalSettings: repo.connection.workspace.reviewSettings,
+        repoSettings: repo.settings,
+        followGlobal: repo.followGlobal,
+      })
+    : undefined;
+  res.json({
+    ref: repo.defaultBranch,
+    ...loaded,
+    ...(inherited ? { inherited: { config: inherited.config, sources: inherited.sources } } : {}),
+  });
 }
 
 // Open pull/merge requests, for picking one to review by hand. Read live from

@@ -403,7 +403,7 @@ export function normalizeDirectory(path: string): string {
     .replace(/\/{2,}/g, "/");
 }
 
-const directoryPathSchema = z
+export const directoryPathSchema = z
   .string()
   .transform(normalizeDirectory)
   .pipe(

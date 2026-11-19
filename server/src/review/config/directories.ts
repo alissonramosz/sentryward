@@ -1,5 +1,5 @@
-import picomatch from "picomatch";
 import type { ChangedFile } from "../core/models.ts";
+import { ignoreMatcher } from "../context/ignore.ts";
 import { directoryContains, type DirectorySetting } from "./schema.ts";
 
 // The folder whose settings a change is reviewed with: only when every file it
@@ -15,7 +15,7 @@ export function pickDirectory(
   ignorePaths: string[],
 ): DirectorySetting | null {
   if (!directories.length) return null;
-  const ignored = picomatch(ignorePaths.length ? ignorePaths : ["\0"], { dot: true });
+  const ignored = ignoreMatcher(ignorePaths);
   const paths = files
     .flatMap((file) => [file.path, file.previousPath])
     .filter((path): path is string => !!path && !ignored(path));

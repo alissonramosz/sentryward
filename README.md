@@ -2008,8 +2008,11 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/repos/last-reviews` | `{ lastReviews }`, each added repository's newest run that wasn't skipped or superseded, by repository id; repositories with none are left out |
 | PUT    | `/api/repos/order` | Admins: `{ ids }`, every added repository in the workspace in the order to show them; 409 if the set has changed |
 | POST   | `/api/repos` | `{ connectionId, externalId }`, enables a repository for review |
-| PATCH  | `/api/repos/:id` | `{ enabled?, settings?, directories?, followGlobal? }`; `settings` replaces the saved review overrides, `directories` the list of [folders](#folder-settings) (`[{ path, settings }]`), `followGlobal` makes the repository ignore both and use only the global config |
-| GET    | `/api/repos/:id/config?directory=` | The effective review config for the default branch, where each value came from, and any repository-file warnings; with `directory`, for a change inside only that folder (404 if it is not saved) |
+| PATCH  | `/api/repos/:id` | `{ enabled?, settings?, followGlobal? }`; `settings` replaces the saved review overrides, `followGlobal` makes the repository ignore them and its [folders](#folder-settings) and use only the global config |
+| POST   | `/api/repos/:id/directories` | `{ path }`; adds a [folder](#folder-settings) with no settings of its own (400 if it overlaps a saved one) |
+| PUT    | `/api/repos/:id/directories` | `{ path, settings }`; replaces one saved folder's settings (404 if it is not saved). Only this folder's rules and connection are checked |
+| DELETE | `/api/repos/:id/directories?path=` | Removes one saved folder (404 if it is not saved) |
+| GET    | `/api/repos/:id/config?directory=` | The effective review config for the default branch, where each value came from, and any repository-file warnings; with `directory`, for a change inside only that folder (404 if it is not saved), plus `inherited`: what the folder inherits (global config and repository settings, without the repository file) |
 
 </details>
 
