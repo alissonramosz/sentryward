@@ -201,7 +201,10 @@ export async function handleGithubEvent(
     const number = payload.pull_request!.number;
     const threadId = comment.in_reply_to_id ? String(comment.in_reply_to_id) : undefined;
     const forge = adapterFor(repo.connection);
-    const allowed = async () => TRUSTED.has(comment.author_association);
+    // The repository role, not author_association, which does not tell read
+    // collaborators from writers. One lookup per delivery serves both handlers.
+    const login = comment.user?.login;
+    const allowed = once(async () => (login ? forge.canPush(repo.fullPath, login) : false));
     // Both handlers may need the thread's root; one forge call serves them.
     const threadRoot = threadId ? once(() => forge.getThreadRoot({ project: repo.fullPath, number }, threadId)) : undefined;
     const stored = await recordReviewComment({

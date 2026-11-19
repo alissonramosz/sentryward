@@ -95,6 +95,23 @@ const commentEvent = (body: string, extra: Record<string, unknown> = {}) => ({
 
 const LONG = "Please wrap database calls in the repository layer, not here.";
 
+const GH_TOKEN = {
+  method: "POST",
+  url: /\/app\/installations\/55\/access_tokens$/,
+  body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+};
+// The commenter's repository role on acme/web; anyone not listed is not a collaborator.
+function ghRoles(roles: Record<string, string> = { alice: "write" }) {
+  return [
+    ...Object.entries(roles).map(([login, role]) => ({
+      url: new RegExp(`/repos/acme/web/collaborators/${login}/permission$`),
+      body: { role_name: role, user: { login, permissions: { push: ["admin", "maintain", "write"].includes(role) } } },
+    })),
+    { url: /\/repos\/acme\/web\/collaborators\/[^/]+\/permission$/, status: 404, body: { message: "Not Found" } },
+  ];
+}
+const isPermissionCall = (call: { url: string }) => call.url.includes("/collaborators/");
+
 function trackFinding(repositoryId: string, number: number, fingerprint = "0123456789abcdef") {
   return prisma.finding.create({
     data: {
@@ -139,6 +156,7 @@ describe("capturing review comments", () => {
   it("stores a top-level GitHub diff comment from someone with push access, once", async () => {
     const repo = await githubRepo();
     await enable();
+    vi.stubGlobal("fetch", fetchStub([GH_TOKEN, ...ghRoles()]).fetch);
 
     expect((await sendGithub("pull_request_review_comment", commentEvent(LONG))).body.outcome).toBe("recorded");
     expect((await sendGithub("pull_request_review_comment", commentEvent(LONG))).body.outcome).toBe("ignored");
@@ -150,12 +168,16 @@ describe("capturing review comments", () => {
   it("skips bots, commands, markers, short remarks, outsiders and excluded reviewers", async () => {
     await githubRepo();
     await enable({ ruleSuggestionsExcludedReviewers: ["Carol"] });
+    vi.stubGlobal("fetch", fetchStub([GH_TOKEN, ...ghRoles({ alice: "write", carol: "write", dave: "read", erin: "triage" })]).fetch);
     const cases = [
       commentEvent(LONG, { user: { login: "sentryward-test[bot]", type: "Bot" } }),
       commentEvent("/sentryward review focus on billing"),
       commentEvent(`${LONG}\n<!-- sentryward:reply -->`),
       commentEvent("nit"),
-      commentEvent(LONG, { author_association: "CONTRIBUTOR" }),
+      commentEvent(LONG, { author_association: "CONTRIBUTOR", user: { login: "frank", type: "User" } }),
+      // A collaborator by association, but without push access.
+      commentEvent(LONG, { author_association: "COLLABORATOR", user: { login: "dave", type: "User" } }),
+      commentEvent(LONG, { author_association: "COLLABORATOR", user: { login: "erin", type: "User" } }),
       commentEvent(LONG, { user: { login: "carol", type: "User" } }),
     ];
     for (const [index, event] of cases.entries()) {
@@ -200,8 +222,8 @@ describe("capturing review comments", () => {
     const repo = await githubRepo();
     await enable();
     await prisma.postedFinding.create({ data: { repositoryId: repo.id, number: 42, fingerprint: "fp", forgeCommentId: "700" } });
-    // No finding is tracked, so the reply path stops without a forge call.
-    const stub = fetchStub([]);
+    // No finding is tracked, so the reply path stops without reading a thread.
+    const stub = fetchStub([GH_TOKEN, ...ghRoles()]);
     vi.stubGlobal("fetch", stub.fetch);
 
     const reply = await sendGithub("pull_request_review_comment", commentEvent(LONG, { in_reply_to_id: 700 }));
@@ -211,7 +233,7 @@ describe("capturing review comments", () => {
     // A reply in a thread people started is evidence.
     await sendGithub("pull_request_review_comment", commentEvent(LONG, { id: 702, in_reply_to_id: 650 }));
     expect(await prisma.reviewComment.count()).toBe(1);
-    expect(stub.calls).toHaveLength(0);
+    expect(stub.calls.filter((call) => call.url.includes("/pulls/comments/"))).toHaveLength(0);
   });
 
   it("knows a Sentryward thread by its root's marker when the local row no longer names it", async () => {
@@ -221,11 +243,8 @@ describe("capturing review comments", () => {
     // The finding was posted again, so its row names the newer comment.
     await prisma.postedFinding.create({ data: { repositoryId: repo.id, number: 42, fingerprint: "0123456789abcdef", forgeCommentId: "900" } });
     const stub = fetchStub([
-      {
-        method: "POST",
-        url: /\/app\/installations\/55\/access_tokens$/,
-        body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
-      },
+      GH_TOKEN,
+      ...ghRoles(),
       {
         url: /\/repos\/acme\/web\/pulls\/comments\/700$/,
         body: { id: 700, body: "**Bug**\n<!-- sentryward:fp=0123456789abcdef -->", user: { login: "sentryward-test[bot]" } },
@@ -236,8 +255,9 @@ describe("capturing review comments", () => {
 
     await sendGithub("pull_request_review_comment", commentEvent(LONG, { in_reply_to_id: 700 }));
     expect(await prisma.reviewComment.count()).toBe(0);
-    // The reply queue read the same root without a second call.
+    // The reply queue read the same root and permission without a second call.
     expect(stub.calls.filter((call) => call.url.endsWith("/pulls/comments/700"))).toHaveLength(1);
+    expect(stub.calls.filter(isPermissionCall)).toHaveLength(1);
 
     // A thread people started on the same change is still evidence.
     await sendGithub("pull_request_review_comment", commentEvent(LONG, { id: 702, in_reply_to_id: 650 }));
@@ -730,6 +750,11 @@ describe("rule suggestions API", () => {
     const res = await run();
     expect(res.status).toBe(202);
     expect(res.body.lastRunAt).toBeNull();
+    // Queued but not yet claimed by the worker: still refused.
+    expect((await run()).status).toBe(429);
+    // A request over an hour old no longer holds it off.
+    await enable({ ruleSuggestionsRequestedAt: new Date(Date.now() - 2 * 60 * 60 * 1000) });
+    expect((await run()).status).toBe(202);
   });
 });
 

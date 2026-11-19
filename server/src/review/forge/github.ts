@@ -151,6 +151,8 @@ function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
 }
 
+const PUSH_ROLES = new Set(["admin", "maintain", "write"]);
+
 function repoApiPath(project: string): string {
   return `/repos/${encodePath(project)}`;
 }
@@ -567,6 +569,23 @@ export class GitHubAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       return { ownedBySelf: this.isSelf(comment), fingerprint: markersIn(comment.body)[0] ?? null };
     } catch (err) {
       if (isNotFound(err)) return null;
+      throw err;
+    }
+  }
+
+  // Whether a user can push to the repository. A comment's author_association
+  // cannot tell: COLLABORATOR covers read and triage collaborators too.
+  // role_name keeps maintain and triage apart (permission folds them into
+  // write and read); permissions.push covers custom roles built on write.
+  async canPush(project: string, login: string): Promise<boolean> {
+    try {
+      const result = await this.http.json<{ role_name?: string; user?: { permissions?: { push?: boolean } } | null }>(
+        `${repoApiPath(project)}/collaborators/${encodeURIComponent(login)}/permission`,
+      );
+      return PUSH_ROLES.has(result.role_name ?? "") || result.user?.permissions?.push === true;
+    } catch (err) {
+      // Not a collaborator.
+      if (isNotFound(err)) return false;
       throw err;
     }
   }

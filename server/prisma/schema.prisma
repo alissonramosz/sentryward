@@ -92,6 +92,9 @@ model Workspace {
   ruleSuggestionsExcludedReviewers String[]  @default([]) @map("rule_suggestions_excluded_reviewers")
   // Set when a run starts, so a failing run waits a full interval. Null is due.
   ruleSuggestionsLastRunAt         DateTime? @map("rule_suggestions_last_run_at") @db.Timestamptz
+  // When Check now was last pressed. Only the cooldown reads it: a requested
+  // run clears ruleSuggestionsLastRunAt, so that alone cannot hold it off.
+  ruleSuggestionsRequestedAt       DateTime? @map("rule_suggestions_requested_at") @db.Timestamptz
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 

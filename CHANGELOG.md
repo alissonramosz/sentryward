@@ -13,13 +13,17 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - Rule suggestions learned from review history. Off by default; owners and
   admins turn it on from the new **Rule suggestions** page (Workspace). While
   on, comments people with push access leave on changed lines are stored
+  (on GitHub, checked against the commenter's repository role, so a
+  read-only or triage collaborator's comments are not kept)
   (`review_comments`) from the GitHub and GitLab webhooks already received,
   skipping bots, commands, Sentryward's own threads (recognised by the thread
   root's marker when the posted-comment record no longer names it) and
   excluded reviewers. The opt-in and exclusions are checked again under a lock
   on the workspace just before a comment is stored, so a comment arriving while
   the feature is turned off is never kept.
-  Once a week per workspace (or on **Check now**, at most hourly) the worker
+  Once a week per workspace (or on **Check now**, at most hourly, counted from
+  the request as well as the last run so a queued check cannot be requested
+  again; `workspaces.rule_suggestions_requested_at`) the worker
   groups the last 90 days of comments and false-positive or intentional
   dismissals, and when something recurs across at least two changes and the
   minimum evidence, asks the workspace's review model for at most five rules
@@ -439,6 +443,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   wait for a status that is no longer posted.
 
 ### Changed
+
+- Replies on Sentryward's GitHub inline threads (questions and
+  `/sentryward ignore`) now require push access by the commenter's
+  repository role (admin, maintain or write) instead of their author
+  association, which counts read-only and triage collaborators as
+  collaborators. This matches GitLab, which already required Developer.
 
 - A committable suggestion that repeats the lines it would replace is
   removed before publishing, along with its fix rationale; the finding is

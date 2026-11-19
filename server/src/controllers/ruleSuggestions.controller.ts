@@ -142,17 +142,23 @@ export async function saveRuleSuggestionSettings(req: Request, res: Response) {
 }
 
 // Makes the workspace due, so the worker picks it up within its check
-// interval. Refused while a run started within the hour.
+// interval. Refused while a run started or was requested within the hour: the
+// request time is kept apart because a due workspace's last run is null, which
+// would otherwise let the button be pressed again until the worker claims it.
 export async function runRuleSuggestions(req: Request, res: Response) {
   const workspaceId = req.workspaceId!;
-  const recent = new Date(Date.now() - RUN_COOLDOWN_MS);
+  const now = new Date();
+  const recent = new Date(now.getTime() - RUN_COOLDOWN_MS);
   const updated = await prisma.workspace.updateMany({
     where: {
       id: workspaceId,
       ruleSuggestionsEnabled: true,
-      OR: [{ ruleSuggestionsLastRunAt: null }, { ruleSuggestionsLastRunAt: { lt: recent } }],
+      AND: [
+        { OR: [{ ruleSuggestionsLastRunAt: null }, { ruleSuggestionsLastRunAt: { lt: recent } }] },
+        { OR: [{ ruleSuggestionsRequestedAt: null }, { ruleSuggestionsRequestedAt: { lt: recent } }] },
+      ],
     },
-    data: { ruleSuggestionsLastRunAt: null },
+    data: { ruleSuggestionsLastRunAt: null, ruleSuggestionsRequestedAt: now },
   });
   if (updated.count === 0) {
     const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { ruleSuggestionsEnabled: true } });

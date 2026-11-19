@@ -689,6 +689,15 @@ describe("replies on inline threads", () => {
     url: /\/app\/installations\/55\/access_tokens$/,
     body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
   };
+  // The commenter's repository role, which decides who may reply; anyone not
+  // listed is not a collaborator.
+  const roles = (byLogin: Record<string, string> = { alice: "write" }, repo = "acme/web") => [
+    ...Object.entries(byLogin).map(([login, role]) => ({
+      url: new RegExp(`/repos/${repo}/collaborators/${login}/permission$`),
+      body: { role_name: role, user: { login, permissions: { push: ["admin", "maintain", "write"].includes(role) } } },
+    })),
+    { url: new RegExp(`/repos/${repo}/collaborators/[^/]+/permission$`), status: 404, body: { message: "Not Found" } },
+  ];
   const rootComment = (login = "sentryward-test[bot]", body = `**Bug**\n<!-- sentryward:fp=${FP} -->`) => ({
     url: /\/repos\/acme\/web\/pulls\/comments\/700$/,
     body: { id: 700, body, user: { login } },
@@ -720,7 +729,7 @@ describe("replies on inline threads", () => {
   it("records an ignore command on a GitHub finding thread", async () => {
     const repo = await githubRepo();
     await tracked(repo.id, 42);
-    vi.stubGlobal("fetch", fetchStub([installationToken, rootComment()]).fetch);
+    vi.stubGlobal("fetch", fetchStub([installationToken, ...roles(), rootComment()]).fetch);
 
     const res = await sendGithub("pull_request_review_comment", replyEvent("/sentryward ignore intentional legacy API"));
 
@@ -741,7 +750,7 @@ describe("replies on inline threads", () => {
 
   it("records a question, and a redelivery only once", async () => {
     await tracked((await githubRepo()).id, 42);
-    vi.stubGlobal("fetch", fetchStub([installationToken, rootComment()]).fetch);
+    vi.stubGlobal("fetch", fetchStub([installationToken, ...roles(), rootComment()]).fetch);
 
     expect((await sendGithub("pull_request_review_comment", replyEvent("Why is this a problem?"))).body.outcome).toBe("queued");
     expect((await sendGithub("pull_request_review_comment", replyEvent("Why is this a problem?"))).body.outcome).toBe("duplicate");
@@ -750,7 +759,7 @@ describe("replies on inline threads", () => {
 
   it("never answers the bot itself, nor a reply carrying its marker", async () => {
     await tracked((await githubRepo()).id, 42);
-    const stub = fetchStub([installationToken, rootComment()]);
+    const stub = fetchStub([installationToken, ...roles(), rootComment()]);
     vi.stubGlobal("fetch", stub.fetch);
 
     const own = replyEvent("Answer", { user: { login: "sentryward-test[bot]" } });
@@ -763,10 +772,13 @@ describe("replies on inline threads", () => {
 
   it("refuses people without push access and threads Sentryward did not start", async () => {
     await tracked((await githubRepo()).id, 42);
-    vi.stubGlobal("fetch", fetchStub([installationToken, rootComment("bob")]).fetch);
+    vi.stubGlobal("fetch", fetchStub([installationToken, ...roles({ alice: "write", dave: "read" }), rootComment("bob")]).fetch);
 
-    const outsider = replyEvent("/sentryward ignore false-positive", { author_association: "CONTRIBUTOR" });
+    const outsider = replyEvent("/sentryward ignore false-positive", { author_association: "CONTRIBUTOR", user: { login: "frank" } });
     expect((await sendGithub("pull_request_review_comment", outsider)).body.outcome).toBe("not_allowed");
+    // COLLABORATOR says nothing about push access; the repository role does.
+    const reader = replyEvent("/sentryward ignore false-positive", { id: 702, author_association: "COLLABORATOR", user: { login: "dave" } });
+    expect((await sendGithub("pull_request_review_comment", reader)).body.outcome).toBe("not_allowed");
     expect((await sendGithub("pull_request_review_comment", replyEvent("Hm?"))).body.outcome).toBe("ignored");
     // A top-level review comment is not a reply.
     const topLevel = replyEvent("Hm?", { in_reply_to_id: undefined });
@@ -777,7 +789,7 @@ describe("replies on inline threads", () => {
   it("stops recording replies on a change past the hourly limit", async () => {
     const repo = await githubRepo();
     await tracked(repo.id, 42);
-    vi.stubGlobal("fetch", fetchStub([installationToken, rootComment()]).fetch);
+    vi.stubGlobal("fetch", fetchStub([installationToken, ...roles(), rootComment()]).fetch);
     await prisma.threadReply.createMany({
       data: Array.from({ length: 10 }, (_, i) => ({
         repositoryId: repo.id,
@@ -799,7 +811,7 @@ describe("replies on inline threads", () => {
 
   it("holds the hourly limit under concurrent deliveries", async () => {
     await tracked((await githubRepo()).id, 42);
-    vi.stubGlobal("fetch", fetchStub([installationToken, rootComment()]).fetch);
+    vi.stubGlobal("fetch", fetchStub([installationToken, ...roles(), rootComment()]).fetch);
 
     const outcomes = await Promise.all(
       Array.from({ length: 15 }, (_, i) =>
@@ -813,7 +825,7 @@ describe("replies on inline threads", () => {
 
   it("looks no further on a change Sentryward raised nothing on", async () => {
     await githubRepo();
-    const stub = fetchStub([installationToken, rootComment()]);
+    const stub = fetchStub([installationToken, ...roles(), rootComment()]);
     vi.stubGlobal("fetch", stub.fetch);
 
     expect((await sendGithub("pull_request_review_comment", replyEvent("Why?"))).body.outcome).toBe("ignored");
@@ -822,7 +834,7 @@ describe("replies on inline threads", () => {
 
   it("fails the delivery when the forge cannot be reached", async () => {
     await tracked((await githubRepo()).id, 42);
-    vi.stubGlobal("fetch", fetchStub([installationToken, { ...rootComment(), status: 502 }]).fetch);
+    vi.stubGlobal("fetch", fetchStub([installationToken, ...roles(), { ...rootComment(), status: 502 }]).fetch);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     expect((await sendGithub("pull_request_review_comment", replyEvent("Why?"))).status).toBe(503);
@@ -835,7 +847,7 @@ describe("replies on inline threads", () => {
     await tracked(repo.id, 8);
     vi.stubGlobal(
       "fetch",
-      fetchStub([{ url: /\/repos\/acme\/api\/pulls\/comments\/700$/, body: { id: 700, body: `<!-- sentryward:fp=${FP} -->`, user: { login: "dev" } } }]).fetch,
+      fetchStub([...roles({ dev: "admin" }, "acme/api"), { url: /\/repos\/acme\/api\/pulls\/comments\/700$/, body: { id: 700, body: `<!-- sentryward:fp=${FP} -->`, user: { login: "dev" } } }]).fetch,
     );
     const event = {
       action: "created",
