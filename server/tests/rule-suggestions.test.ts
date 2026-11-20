@@ -14,7 +14,7 @@ import {
 } from "../src/review/learn/suggest.ts";
 import { repairRuleSuggestOutput, ruleSuggestOutputSchema, ruleSuggestUserPrompt, toDrafts } from "../src/review/llm/ruleSuggest.ts";
 import { mergePolicy, OPEN_LAYER, policyFor } from "../src/services/privacyPolicy.ts";
-import { recordReviewComment } from "../src/services/reviewComments.ts";
+import { authoredAt, recordReviewComment } from "../src/services/reviewComments.ts";
 import { pruneRuleHistory, runRetention } from "../src/worker/retention.ts";
 import { runNextRuleSuggestions, type RuleSuggestionDeps } from "../src/worker/ruleSuggestions.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
@@ -164,6 +164,52 @@ describe("capturing review comments", () => {
     expect(await prisma.reviewComment.findMany()).toMatchObject([
       { repositoryId: repo.id, number: 42, forgeCommentId: "701", author: "alice", body: LONG, file: "src/billing/api.ts", line: 12 },
     ]);
+  });
+
+  it("ages a comment from when it was written, not when it was delivered", async () => {
+    await githubRepo();
+    await enable();
+    vi.stubGlobal("fetch", fetchStub([GH_TOKEN, ...ghRoles()]).fetch);
+    const written = new Date(Date.now() - 5 * 24 * 3600_000);
+
+    const event = commentEvent(LONG, { created_at: written.toISOString() });
+    expect((await sendGithub("pull_request_review_comment", event)).body.outcome).toBe("recorded");
+    expect((await prisma.reviewComment.findFirstOrThrow()).createdAt).toEqual(written);
+  });
+
+  it("does not keep a comment delivered after its history window has passed", async () => {
+    await githubRepo();
+    await enable();
+    const stub = fetchStub([GH_TOKEN, ...ghRoles()]);
+    vi.stubGlobal("fetch", stub.fetch);
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * 3600_000).toISOString();
+
+    // Past the 90-day history window.
+    const old = commentEvent(LONG, { id: 801, created_at: daysAgo(91) });
+    expect((await sendGithub("pull_request_review_comment", old)).body.outcome).toBe("ignored");
+    // Within it, but past the workspace's shorter retention period.
+    await prisma.workspacePrivacy.create({ data: { workspaceId, retentionDays: 7 } });
+    const pastRetention = commentEvent(LONG, { id: 802, created_at: daysAgo(8) });
+    expect((await sendGithub("pull_request_review_comment", pastRetention)).body.outcome).toBe("ignored");
+    expect(await prisma.reviewComment.count()).toBe(0);
+    // Skipped before the commenter's permissions are looked up.
+    expect(stub.calls.filter(isPermissionCall)).toHaveLength(0);
+
+    expect((await sendGithub("pull_request_review_comment", commentEvent(LONG, { id: 803, created_at: daysAgo(6) }))).body.outcome).toBe(
+      "recorded",
+    );
+  });
+
+  it("reads the forge's timestamp, falling back to now when it is missing, garbled or ahead", () => {
+    const now = new Date("2026-11-20T12:00:00Z");
+    expect(authoredAt("2026-11-01T10:00:00Z", now)).toEqual(new Date("2026-11-01T10:00:00Z"));
+    expect(authoredAt("2026-11-01T10:00:00.000+02:00", now)).toEqual(new Date("2026-11-01T08:00:00Z"));
+    // GitLab's older note format.
+    expect(authoredAt("2026-11-01 10:00:00 UTC", now)).toEqual(new Date("2026-11-01T10:00:00Z"));
+    expect(authoredAt(undefined, now)).toBe(now);
+    expect(authoredAt(null, now)).toBe(now);
+    expect(authoredAt("yesterday-ish", now)).toBe(now);
+    expect(authoredAt("2027-01-01T00:00:00Z", now)).toBe(now);
   });
 
   it("fails the delivery when a top-level comment cannot be recorded, so it can be redelivered", async () => {
@@ -320,6 +366,7 @@ describe("capturing review comments", () => {
         { url: /\/users\/5$/, body: { bot: false } },
       ]).fetch,
     );
+    const written = new Date(Math.floor(Date.now() / 1000 - 3 * 24 * 3600) * 1000);
     const note = (id: number, text: string) => ({
       object_kind: "note",
       user: { id: 5, username: "alice" },
@@ -330,12 +377,16 @@ describe("capturing review comments", () => {
         discussion_id: "disc9",
         note: text,
         position: { new_path: "lib/db.rb", new_line: 4 },
+        // GitLab's older format, a few days back (whole seconds).
+        created_at: `${written.toISOString().slice(0, 19).replace("T", " ")} UTC`,
       },
       merge_request: { iid: 7, last_commit: { id: "glsha" } },
     });
 
     await sendGitlab(repo.id, note(1, LONG));
-    expect(await prisma.reviewComment.findMany()).toMatchObject([{ number: 7, forgeCommentId: "1", file: "lib/db.rb", line: 4 }]);
+    expect(await prisma.reviewComment.findMany()).toMatchObject([
+      { number: 7, forgeCommentId: "1", file: "lib/db.rb", line: 4, createdAt: written },
+    ]);
     level = 20;
     await sendGitlab(repo.id, note(2, LONG));
     expect(await prisma.reviewComment.count()).toBe(1);

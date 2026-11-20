@@ -23,7 +23,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   root's marker when the posted-comment record no longer names it),
   excluded reviewers and comments not anchored to a current new-side line
   (outdated comments, GitLab notes on removed lines), which are skipped before
-  the commenter's permissions are looked up. The opt-in and exclusions are checked again under a lock
+  the commenter's permissions are looked up. A comment is stored with the
+  forge's authoring time (clamped to now), not its delivery time, so a late or
+  redelivered comment ages from when it was written; one already past the
+  90-day history window or the workspace's retention period is not stored at
+  all. The opt-in and exclusions are checked again under a lock
   on the workspace just before a comment is stored, so a comment arriving while
   the feature is turned off is never kept. The excluded-reviewers list
   (`workspaces.rule_suggestions_excluded_reviewers`) is `NOT NULL`, so a

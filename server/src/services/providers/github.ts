@@ -64,6 +64,7 @@ export interface GitHubPayload {
     // the comment is on a removed line or the line no longer exists).
     path?: string;
     line?: number | null;
+    created_at?: string;
   };
   sender?: { login: string };
 }
@@ -211,6 +212,7 @@ export async function handleGithubEvent(
       threadRoot,
       author: comment.user?.login,
       body: comment.body ?? "",
+      createdAt: comment.created_at,
       file: comment.path,
       line: comment.line,
       isSelf: comment.user?.type === "Bot",

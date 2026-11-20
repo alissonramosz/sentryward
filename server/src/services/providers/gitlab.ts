@@ -30,6 +30,7 @@ interface GitLabPayload {
     discussion_id?: string;
     // DiffNotes only: where on the diff the note was left.
     position?: { new_path?: string; old_path?: string; new_line?: number | null };
+    created_at?: string;
     last_commit?: { id: string };
     target_branch?: string;
   };
@@ -173,6 +174,7 @@ export const gitlabProvider: ProviderDefinition = {
           threadRoot,
           author: user.username,
           body: attrs.note ?? "",
+          createdAt: attrs.created_at,
           file: attrs.position?.new_path ?? attrs.position?.old_path,
           line: attrs.position?.new_line,
           isSelf: false,

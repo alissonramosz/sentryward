@@ -4,6 +4,8 @@ import { ForgeError } from "../review/forge/http.ts";
 import { REVIEW_COMMAND } from "../lib/webhook.ts";
 import { markersIn, REPLY_MARKER } from "../review/core/markers.ts";
 import type { ThreadRoot } from "../review/forge/types.ts";
+import { ruleHistoryCutoff } from "../worker/retention.ts";
+import { policyFor } from "./privacyPolicy.ts";
 import type { RepoWithConnection } from "./providers/types.ts";
 import { isUniqueViolation } from "./users.ts";
 
@@ -28,6 +30,10 @@ export interface ReviewCommentInput {
   threadRoot?: () => Promise<ThreadRoot | null>;
   author: string | undefined;
   body: string;
+  // When the forge says the comment was written. A delivery can come long
+  // after (a redelivery, a hook queued while the app was down), and retention
+  // and evidence selection age the row by this, not by its arrival.
+  createdAt?: string | null;
   file: string | undefined;
   line: number | null | undefined;
   // Whether the author is Sentryward itself. Only decidable from the login on
@@ -83,6 +89,20 @@ function withoutNul(text: string): string {
   return text.replaceAll("\u0000", "");
 }
 
+// GitLab's note hooks have sent "2015-05-17 18:21:36 UTC" as well as ISO 8601;
+// rewritten rather than left to the engine's lenient parsing.
+const GITLAB_UTC = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?) UTC$/;
+
+// The comment's authoring time. Without a usable one the delivery time is the
+// best bound left; one in the future (clock skew) is clamped to now, so the
+// forge's timestamp can only shorten how long a comment is kept, never extend it.
+export function authoredAt(raw: string | null | undefined, now: Date): Date {
+  if (!raw) return now;
+  const parsed = new Date(raw.trim().replace(GITLAB_UTC, "$1T$2Z"));
+  if (Number.isNaN(parsed.getTime())) return now;
+  return parsed > now ? now : parsed;
+}
+
 async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> {
   const { repo, number, author } = input;
   const body = withoutNul(input.body);
@@ -92,6 +112,13 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
   });
   // Nothing is kept for a workspace that did not opt in.
   if (!workspace?.ruleSuggestionsEnabled) return "off";
+  // A comment already past the history window (or a shorter retention period)
+  // would only be deleted by the next sweep; it is not held at all. Checked
+  // before any forge call, at the cost of one local read.
+  const now = new Date();
+  const createdAt = authoredAt(input.createdAt, now);
+  const policy = await policyFor(repo.connection.workspaceId);
+  if (createdAt < ruleHistoryCutoff(policy.retentionDays, now)) return "skipped";
 
   const text = body.trim();
   // Only a comment anchored to a current new-side line is about the change:
@@ -133,6 +160,7 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
           body: text.slice(0, MAX_COMMENT_BODY),
           file,
           line,
+          createdAt,
         },
       });
       return "stored";
