@@ -10,6 +10,29 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Deep review (`review.deep`). Off by default; when on, every review pass of a
+  change is reviewed again by up to seven specialists (`naming`,
+  `invariants`, `boundaries`, `contracts`, `tests`, `leaks`, `consistency`),
+  each told to look for one kind of defect only, at one more model call per
+  pass each. Settable at every config layer (`review.deep.enabled`,
+  `review.deep.specialists`), on the Finding Types tab, or for one run with
+  `/sentryward review deep` or the **Deep review** switch in the manual review
+  sheet (stored on the job as `review_jobs.deep`, kept by re-runs). Specialist
+  findings are tagged with the specialist (`reviewer`) and their calls with
+  `lens` in usage; they skip the category filter like rule findings, never
+  carry team rules (those stay with the general pass), and a failed
+  specialist pass is a warning rather than a partial review. Specialist
+  findings on files whose general pass failed are dropped with those files,
+  and a warning says how many. In agentic mode specialists leave half of
+  `review.agent.maxSearches` to the general passes. `/sentryward review
+  deep-dive ...` is not read as a deep review request. A specialist's
+  rewording of a general finding (same file, category and overlapping lines,
+  with titles sharing at least half their words) is merged as a duplicate;
+  reports from the same pass never are. The review page tags each finding
+  with its specialist and shows how many ran. The eval runner gains `--deep`
+  (and `--compare --deep`) with per-specialist hits, false positives and
+  cost, and two new cases (`ts-hollow-discount-test`,
+  `ts-renamed-status-value`).
 - Rule suggestions learned from review history. Off by default; owners and
   admins turn it on from the new **Rule suggestions** page (Workspace). While
   on, comments people with push access leave on changed lines are stored
