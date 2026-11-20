@@ -1,4 +1,5 @@
 import { HttpError } from "../../lib/httpError.ts";
+import { once } from "../../lib/once.ts";
 import { parseJson, parseReviewCommand, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
 import type { ForgeConnection } from "../../generated/prisma/client.ts";
 import { GitLabAdapter } from "../../review/forge/gitlab.ts";
@@ -6,6 +7,7 @@ import { gitlabConnectSchema } from "../../schemas/connections.schema.ts";
 import { gitlabAccessToken, gitlabOAuthConfigured } from "../gitlabOAuth.ts";
 import { cancelQueuedForClosedChange, enqueue, enqueueFromWebhook } from "../../worker/queue.ts";
 import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
+import { recordReviewComment } from "../reviewComments.ts";
 import { recordThreadReply } from "../threadReplies.ts";
 import type { ProviderDefinition } from "./types.ts";
 import { decryptToken } from "./token.ts";
@@ -26,6 +28,9 @@ interface GitLabPayload {
     // "DiffNote" for a note on a diff line, which is where inline threads live.
     type?: string | null;
     discussion_id?: string;
+    // DiffNotes only: where on the diff the note was left.
+    position?: { new_path?: string; old_path?: string; new_line?: number | null };
+    created_at?: string;
     last_commit?: { id: string };
     target_branch?: string;
   };
@@ -138,7 +143,9 @@ export const gitlabProvider: ProviderDefinition = {
 
       // A note on a diff thread. The thread's own first note arrives here too;
       // recordThreadReply drops it by its marker. Both connection kinds post as
-      // the connected person, so the login cannot tell the bot apart.
+      // the connected person, so the login cannot tell the bot apart. Other
+      // bots (access tokens, service accounts) are not marked in the payload
+      // either; rule evidence asks the users API, once it would be kept.
       if (
         event === "Note Hook" &&
         attrs.noteable_type === "MergeRequest" &&
@@ -150,17 +157,50 @@ export const gitlabProvider: ProviderDefinition = {
       ) {
         const user = payload.user;
         const forge = adapterFor(repo.connection);
-        return recordThreadReply({
+        const number = payload.merge_request.iid;
+        const threadId = attrs.discussion_id;
+        // Both handlers may ask who the author is and what opened the
+        // discussion; each forge call is made once per delivery.
+        const allowed = once(async () => (await forge.memberAccessLevel(repo.externalId, user.id)) >= DEVELOPER);
+        const threadRoot = once(() => forge.getThreadRoot({ project: repo.fullPath, number }, threadId));
+        // Rule suggestion evidence when the workspace learns rules. Every note
+        // of a discussion arrives with its id, so a discussion Sentryward opened
+        // is skipped there, as are its own notes by their markers.
+        const stored = await recordReviewComment({
+          repo,
+          number,
+          commentId: String(attrs.id),
+          threadId,
+          threadRoot,
+          author: user.username,
+          body: attrs.note ?? "",
+          createdAt: attrs.created_at,
+          file: attrs.position?.new_path ?? attrs.position?.old_path,
+          line: attrs.position?.new_line,
+          isSelf: false,
+          allowed,
+          isBot: once(() => forge.userIsBot(user.id)),
+        });
+        const reply = await recordThreadReply({
           repo,
           forge,
-          number: payload.merge_request.iid,
-          threadId: attrs.discussion_id,
+          number,
+          threadId,
           commentId: String(attrs.id),
           actor: user.username,
           body: attrs.note ?? "",
           botLogin: false,
-          allowed: async () => (await forge.memberAccessLevel(repo.externalId, user.id)) >= DEVELOPER,
+          allowed,
+          threadRoot,
         });
+        // Every GitLab diff note is in a discussion, so unlike GitHub a failure
+        // to store it cannot wait for a delivery without a thread. The reply is
+        // handled first, then the delivery fails so GitLab can redeliver it:
+        // both handlers answer "duplicate" for what they already recorded.
+        // Only a failure a retry could fix: GitLab disables a hook that keeps
+        // failing, which would stop automatic reviews too.
+        if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
+        return reply;
       }
 
       return { body: { outcome: "ignored" } };

@@ -1,6 +1,8 @@
 import type { Request, Response } from "express";
+import type { Prisma, PrismaClient } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
+import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevision.ts";
 import { CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW } from "../review/context/budget.ts";
 import { CATEGORIES, SEVERITIES } from "../review/core/severity.ts";
 import { THINKING_BUDGETS } from "../review/llm/thinking.ts";
@@ -48,7 +50,16 @@ function globalConfigBody(saved: unknown) {
 // repository's own rules out; the owner is told which repositories lost them,
 // on every read until it is fixed.
 async function repositoryRuleWarnings(workspaceId: string, globalSettings: unknown): Promise<string[]> {
-  const repos = await prisma.repository.findMany({
+  return repositoryRuleIssues(await loadRuleRepositories(prisma, workspaceId), globalSettings);
+}
+
+export type RuleRepository = { fullPath: string; settings: unknown; directories: unknown };
+
+// The workspace's repositories with rules of their own (or in a folder) that
+// the global settings apply under. Shared with rule suggestion approvals, so
+// what an approval refuses and what this page warns about cannot drift apart.
+export async function loadRuleRepositories(db: PrismaClient | Prisma.TransactionClient, workspaceId: string): Promise<RuleRepository[]> {
+  const repos = await db.repository.findMany({
     where: { connection: { workspaceId }, followGlobal: false },
     select: { fullPath: true, settings: true, directories: true },
   });
@@ -56,13 +67,20 @@ async function repositoryRuleWarnings(workspaceId: string, globalSettings: unkno
     const rules = (settings as { rules?: unknown[] } | null)?.rules;
     return Array.isArray(rules) && rules.length > 0;
   };
-  return repos.flatMap((repo) => {
+  return repos.filter((repo) => {
     const directories = Array.isArray(repo.directories) ? (repo.directories as { settings?: unknown }[]) : [];
-    if (!hasRules(repo.settings) && !directories.some((dir) => hasRules(dir?.settings))) return [];
-    return repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
-      (issue) => `${repo.fullPath}: ${issue.message}`,
-    );
+    return hasRules(repo.settings) || directories.some((dir) => hasRules(dir?.settings));
   });
+}
+
+// The repository and folder rules these global settings leave out, one
+// message each, prefixed with the repository.
+export function repositoryRuleIssues(repos: RuleRepository[], globalSettings: unknown): string[] {
+  return repos.flatMap((repo) =>
+    repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
+      (issue) => `${repo.fullPath}: ${issue.message}`,
+    ),
+  );
 }
 
 export async function getGlobalConfig(req: Request, res: Response) {
@@ -76,19 +94,32 @@ export async function getGlobalConfig(req: Request, res: Response) {
 async function globalConfigResponse(workspaceId: string, saved: unknown) {
   const body = globalConfigBody(saved);
   const repositories = await repositoryRuleWarnings(workspaceId, saved);
-  return { ...body, warnings: [...body.warnings, ...repositories] };
+  return { ...body, revision: settingsRevision(saved), warnings: [...body.warnings, ...repositories] };
 }
 
 export async function updateGlobalConfig(req: Request, res: Response) {
-  const { settings } = updateGlobalConfigSchema.parse(req.body);
+  const { settings, revision } = updateGlobalConfigSchema.parse(req.body);
+  // Before any other check, so a page loaded before revisions existed is told
+  // to reload rather than shown an error about its settings.
+  if (revision === undefined) throw new HttpError(409, MISSING_REVISION_MESSAGE);
   if (!settings.llm?.connection) {
     throw new HttpError(400, "Validation failed", { connection: ["Select an LLM connection"] });
   }
   await requireStoredLlmConnection(req.workspaceId!, settings.llm.connection);
-  const workspace = await prisma.workspace.update({
-    where: { id: req.workspaceId! },
-    data: { reviewSettings: settings },
-    select: { reviewSettings: true },
+  // Under the workspace row lock a rule suggestion approval takes, so the
+  // revision check and the write cannot interleave with a rule being added.
+  const workspace = await prisma.$transaction(async (tx) => {
+    const [current] = await tx.$queryRaw<{ review_settings: unknown }[]>`
+      SELECT review_settings FROM workspaces WHERE id = ${req.workspaceId!}::uuid FOR NO KEY UPDATE
+    `;
+    if (revision !== settingsRevision(current!.review_settings)) {
+      throw new HttpError(409, "The global settings changed since the page loaded; reload and try again");
+    }
+    return tx.workspace.update({
+      where: { id: req.workspaceId! },
+      data: { reviewSettings: settings },
+      select: { reviewSettings: true },
+    });
   });
   res.json(await globalConfigResponse(req.workspaceId!, workspace.reviewSettings));
 }

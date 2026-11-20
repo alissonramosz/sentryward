@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { Prisma, type ReviewStatus, type ReviewVerdict } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
+import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevision.ts";
 import { dropRepositoriesFromTargets } from "../services/notifications.ts";
 import { loadReviewConfig, repoSettingsRuleIssues, resolveDashboardLayers } from "../review/config/load.ts";
 import { directorySettingsSchema, normalizeDirectory, type DashboardOverride, type DirectorySetting } from "../review/config/schema.ts";
@@ -10,6 +11,7 @@ import { adapterForConnection, loadWorkspaceConnection, toHttpError } from "../s
 import { requireStoredLlmConnection } from "../services/llm.ts";
 import { ensureWebhook, removeWebhook } from "../services/webhooks.ts";
 import { cancelForDisabledRepositories, DISABLED_REASON } from "../worker/queue.ts";
+import { stripRepositoryEvidence } from "./ruleSuggestions.controller.ts";
 import {
   addDirectorySchema,
   availableReposQuerySchema,
@@ -38,6 +40,13 @@ const publicRepo = {
   createdAt: true,
 } as const;
 
+// A repository as the client sees it, with the revision its settings form
+// sends back on save (lib/settingsRevision.ts).
+async function loadPublicRepo(id: string) {
+  const repo = await prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
+  return { ...repo, settingsRevision: settingsRevision(repo.settings) };
+}
+
 // The repositories a user has added. Read from the database only, so the page
 // loads without asking the forge for every repository the account can see.
 export async function listRepos(req: Request, res: Response) {
@@ -64,6 +73,7 @@ export async function listRepos(req: Request, res: Response) {
       webUrl: `${hostOrigin(repo.connection.host)}/${repo.fullPath}`,
       enabled: repo.enabled,
       settings: repo.settings,
+      settingsRevision: settingsRevision(repo.settings),
       directories: repo.directories,
       followGlobal: repo.followGlobal,
       position: repo.position,
@@ -180,7 +190,7 @@ export async function enableRepo(req: Request, res: Response) {
   });
   // Manual reviews work either way; the webhook only adds automatic ones.
   const webhook = await ensureWebhook(saved, connection);
-  const repo = await prisma.repository.findUniqueOrThrow({ where: { id: saved.id }, select: publicRepo });
+  const repo = await loadPublicRepo(saved.id);
   res.status(201).json({ repo, webhook });
 }
 
@@ -197,8 +207,11 @@ async function loadOwnedRepo(workspaceId: string, id: string) {
 
 export async function updateRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
-  const { enabled, settings, followGlobal } = updateRepoSchema.parse(req.body);
+  const { enabled, settings, settingsRevision: revision, followGlobal } = updateRepoSchema.parse(req.body);
   const existing = await loadOwnedRepo(req.workspaceId!, id);
+  // Required with settings, but checked here rather than in the schema so a
+  // page loaded before revisions existed is told to reload.
+  if (settings !== undefined && revision === undefined) throw new HttpError(409, MISSING_REVISION_MESSAGE);
 
   await requireSettingsConnection(req.workspaceId!, settings);
 
@@ -208,15 +221,28 @@ export async function updateRepo(req: Request, res: Response) {
   // The cancel commits with the update, so a repository is never left off with
   // jobs still in flight. A job claimed just before finds it off in runJob.
   const updated = await prisma.$transaction(async (tx) => {
-    if (settings !== undefined) {
-      // Under the same row lock as folder changes, so a folder saved meanwhile
-      // is checked against these settings too.
-      await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+    // Settings and follow-global changes both decide which rule layers are
+    // active, so both take the locks folder changes and global approvals take:
+    // an approval then sees the repository's final layers, not one about to
+    // switch to its own rules. Under the same row lock as folder changes, so a
+    // folder saved meanwhile is checked against these settings too.
+    if (settings !== undefined || followGlobal !== undefined) {
+      const globalSettings = await lockForRules(tx, req.workspaceId!, id);
       const saved = await tx.repository.findUniqueOrThrow({
         where: { id },
         select: { settings: true, directories: true, followGlobal: true },
       });
-      requireRepoSettingsRules(existing.connection.workspace.reviewSettings, saved, settings, followGlobal ?? saved.followGlobal);
+      if (settings !== undefined) {
+        // Sent whenever settings are (checked above).
+        if (revision !== settingsRevision(saved.settings)) {
+          throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
+        }
+        requireRepoSettingsRules(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
+      } else if (followGlobal === false && saved.followGlobal) {
+        // Leaving the global settings activates the saved ones, read under the
+        // row lock, so they are checked as a save of them would be.
+        requireRepoSettingsRules(globalSettings, saved, saved.settings, false);
+      }
     }
     const row = await tx.repository.update({
       where: { id },
@@ -228,8 +254,22 @@ export async function updateRepo(req: Request, res: Response) {
   let webhook;
   if (enabled === true) webhook = await ensureWebhook(updated, existing.connection);
   if (enabled === false) await removeWebhook(updated, existing.connection);
-  const repo = await prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
+  const repo = await loadPublicRepo(id);
   res.json({ repo, ...(webhook ? { webhook } : {}) });
+}
+
+// Locks the repository for a settings, follow-global or folder change and
+// returns the global settings to check its rules against, read under a share
+// lock on the workspace: a rule suggestion approval or global save (FOR NO KEY UPDATE)
+// cannot then add a clashing global rule between the check and the commit.
+// The workspace first, then the repository, the order approvals take them in,
+// which would otherwise deadlock with this.
+async function lockForRules(tx: Prisma.TransactionClient, workspaceId: string, id: string): Promise<unknown> {
+  const [workspace] = await tx.$queryRaw<{ review_settings: unknown }[]>`
+    SELECT review_settings FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
+  `;
+  await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+  return workspace?.review_settings;
 }
 
 // Repository rules the layers below would leave out are refused, and so are
@@ -237,10 +277,10 @@ export async function updateRepo(req: Request, res: Response) {
 // a folder rule's id, or the combined limit), since the folder would otherwise
 // lose them with only a review warning. A folder that was already broken
 // before this save stays a warning, so it does not block unrelated edits.
-function requireRepoSettingsRules(
+export function requireRepoSettingsRules(
   globalSettings: unknown,
   saved: { settings: unknown; directories: unknown },
-  settings: DashboardOverride,
+  settings: unknown,
   followGlobal: boolean,
 ) {
   const after = repoSettingsRuleIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal });
@@ -275,9 +315,9 @@ async function changeDirectories(
   id: string,
   change: (dirs: DirectorySetting[]) => { dirs: DirectorySetting[]; checkRules?: string },
 ) {
-  const existing = await loadOwnedRepo(workspaceId, id);
+  await loadOwnedRepo(workspaceId, id);
   await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+    const globalSettings = await lockForRules(tx, workspaceId, id);
     const row = await tx.repository.findUniqueOrThrow({
       where: { id },
       select: { settings: true, directories: true, followGlobal: true },
@@ -294,7 +334,7 @@ async function changeDirectories(
     if (checkRules !== undefined) {
       const index = parsed.data.findIndex((dir) => dir.path === checkRules);
       const issues = repoSettingsRuleIssues({
-        globalSettings: existing.connection.workspace.reviewSettings,
+        globalSettings,
         repoSettings: row.settings,
         directories: parsed.data,
         followGlobal: row.followGlobal,
@@ -303,7 +343,7 @@ async function changeDirectories(
     }
     await tx.repository.update({ where: { id }, data: { directories: parsed.data } });
   });
-  return prisma.repository.findUniqueOrThrow({ where: { id }, select: publicRepo });
+  return loadPublicRepo(id);
 }
 
 function requireDirectory(dirs: DirectorySetting[], path: string) {
@@ -343,7 +383,10 @@ export async function removeDirectory(req: Request, res: Response) {
 
 // Review jobs and posted findings go with it (cascade), so re-adding the
 // repository later starts without history. Notification filters drop it in the
-// same step.
+// same step, as do rule suggestions still pending for it: with no repository
+// they would read as suggestions for the global settings. Decided ones keep
+// their history without it. Other suggestions citing its comments or
+// dismissals lose those excerpts, so its people's words go with it.
 export async function deleteRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
   const repo = await loadOwnedRepo(req.workspaceId!, id);
@@ -351,6 +394,8 @@ export async function deleteRepo(req: Request, res: Response) {
   await removeWebhook(repo, repo.connection).catch(() => undefined);
   await prisma.$transaction(async (tx) => {
     await dropRepositoriesFromTargets(tx, [id]);
+    await tx.ruleSuggestion.deleteMany({ where: { repositoryId: id, status: "pending" } });
+    await stripRepositoryEvidence(tx, req.workspaceId!, { id, host: repo.host, fullPath: repo.fullPath });
     await tx.repository.delete({ where: { id } });
   });
   res.status(204).end();

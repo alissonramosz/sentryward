@@ -757,4 +757,17 @@ export class GitLabAdapter implements ForgeAdapter, ForgePublisher, ForgeHooks, 
       throw err;
     }
   }
+
+  // Whether a user is a bot (a project or group access token, a service
+  // account). Webhook payloads do not say; the users API does. A user that is
+  // gone counts as a person: the access check refuses them anyway.
+  async userIsBot(userId: number): Promise<boolean> {
+    try {
+      const user = await this.http.json<{ bot?: boolean }>(`/users/${userId}`);
+      return user.bot === true;
+    } catch (err) {
+      if (isNotFound(err)) return false;
+      throw err;
+    }
+  }
 }

@@ -41,6 +41,7 @@ const PURPOSE_OPTIONS: { value: AuditPurpose; label: string }[] = [
   { value: "verify", label: "Verify" },
   { value: "probe", label: "Capability probe" },
   { value: "reply", label: "Thread reply" },
+  { value: "rule_suggest", label: "Rule suggestions" },
   { value: "test", label: "Connection test" },
 ]
 

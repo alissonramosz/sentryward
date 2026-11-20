@@ -81,6 +81,24 @@ model Workspace {
   // USD per UTC calendar month; null is no budget. Only notifies: reviews
   // never stop over it (worker/budgetAlerts.ts).
   monthlyBudgetUsd Float?   @map("monthly_budget_usd")
+  // Rule suggestions learned from review history (worker/ruleSuggestions.ts).
+  // Off by default: each run is a model call billed to the workspace, and
+  // human review comments are only stored while it is on.
+  ruleSuggestionsEnabled           Boolean   @default(false) @map("rule_suggestions_enabled")
+  // How many dismissals or comments, across at least two changes, a
+  // suggestion must cite.
+  ruleSuggestionsMinEvidence       Int       @default(5) @map("rule_suggestions_min_evidence")
+  // Forge logins whose comments are never stored or learned from.
+  ruleSuggestionsExcludedReviewers String[]  @default([]) @map("rule_suggestions_excluded_reviewers")
+  // Set when a run starts, so a failing run waits a full interval. Null is due.
+  ruleSuggestionsLastRunAt         DateTime? @map("rule_suggestions_last_run_at") @db.Timestamptz
+  // Identifies the run in flight. Each claim sets a new one and turning
+  // suggestions off clears it, so a run cannot become current again when
+  // suggestions are turned back on.
+  ruleSuggestionsRunToken          String?   @map("rule_suggestions_run_token") @db.Uuid
+  // When Check now was last pressed. Only the cooldown reads it: a requested
+  // run clears ruleSuggestionsLastRunAt, so that alone cannot hold it off.
+  ruleSuggestionsRequestedAt       DateTime? @map("rule_suggestions_requested_at") @db.Timestamptz
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -96,6 +114,7 @@ model Workspace {
   privacy         WorkspacePrivacy?
   llmRequestLogs  LlmRequestLog[]
   budgetAlerts    BudgetAlert[]
+  ruleSuggestions RuleSuggestion[]
 
   @@map("workspaces")
 }
@@ -434,6 +453,8 @@ model Repository {
   threadReplies  ThreadReply[]
   backlogItems   BacklogItem[]
   changeStates   ChangeState[]
+  reviewComments ReviewComment[]
+  ruleSuggestions RuleSuggestion[]
 
   @@unique([connectionId, externalId])
   // Trigram index for the reviews search, which matches the path anywhere and
@@ -578,13 +599,19 @@ model Finding {
   // The forge thread could not be moved to match `state` (a failed resolve or
   // reopen). Later runs retry it until the forge agrees.
   threadPending Boolean          @default(false) @map("thread_pending")
+  // The rule suggestion that cited this dismissal, so it is cited at most once.
+  suggestionId  String?          @map("suggestion_id") @db.Uuid
 
-  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
-  lastJob    ReviewJob? @relation(fields: [lastJobId], references: [id], onDelete: SetNull)
+  repository Repository      @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  lastJob    ReviewJob?      @relation(fields: [lastJobId], references: [id], onDelete: SetNull)
+  suggestion RuleSuggestion? @relation(fields: [suggestionId], references: [id], onDelete: SetNull)
 
   @@unique([repositoryId, number, fingerprint])
   @@index([repositoryId, state])
   @@index([repositoryId, lifecycle])
+  // Postgres does not index foreign keys; without this, deleting a suggestion
+  // scans every finding to apply SET NULL.
+  @@index([suggestionId])
   @@map("findings")
 }
 
@@ -765,6 +792,71 @@ model ThreadReply {
   @@index([repositoryId, number, createdAt])
   @@index([status, createdAt])
   @@map("thread_replies")
+}
+
+// A person's comment on a changed line, kept only while the workspace has
+// rule suggestions on, and only from people with write access. Untrusted text:
+// only ever sent to a model as data. Pruned by retention like review results.
+model ReviewComment {
+  id             String   @id @default(uuid()) @db.Uuid
+  repositoryId   String   @map("repository_id") @db.Uuid
+  number         Int
+  forgeCommentId String   @map("forge_comment_id")
+  author         String
+  body           String
+  file           String
+  line           Int?
+  // The rule suggestion that cited it, so it is cited at most once.
+  suggestionId   String?  @map("suggestion_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  repository Repository      @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  suggestion RuleSuggestion? @relation(fields: [suggestionId], references: [id], onDelete: SetNull)
+
+  @@unique([repositoryId, forgeCommentId])
+  @@index([repositoryId, createdAt])
+  // See Finding.suggestionId: the SET NULL on delete needs it.
+  @@index([suggestionId])
+  @@map("review_comments")
+}
+
+enum RuleSuggestionStatus {
+  pending
+  approved
+  discarded
+
+  @@map("rule_suggestion_status")
+}
+
+// A team rule drafted from review history, waiting for an admin. Nothing
+// reaches a config layer until it is approved (controllers/ruleSuggestions.controller.ts).
+model RuleSuggestion {
+  id            String               @id @default(uuid()) @db.Uuid
+  workspaceId   String               @map("workspace_id") @db.Uuid
+  // Suggested target: the one repository the evidence came from, or null for
+  // the workspace's global settings.
+  repositoryId  String?              @map("repository_id") @db.Uuid
+  status        RuleSuggestionStatus @default(pending)
+  // A ruleSchema value (review/config/schema.ts).
+  rule          Json
+  rationale     String
+  // { findingIds, commentIds, changes, excerpts }; excerpts are trimmed with
+  // the comments they quote (privacy period, or 90 days), whatever the status.
+  evidence      Json
+  model         String
+  // "global" or the repository id the approved rule was saved to.
+  appliedTarget String?              @map("applied_target")
+  decidedById   String?              @map("decided_by_id") @db.Uuid
+  decidedAt     DateTime?            @map("decided_at") @db.Timestamptz
+  createdAt     DateTime             @default(now()) @map("created_at") @db.Timestamptz
+
+  workspace  Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  repository Repository?     @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  findings   Finding[]
+  comments   ReviewComment[]
+
+  @@index([workspaceId, status, createdAt])
+  @@map("rule_suggestions")
 }
 
 model LlmCredential {

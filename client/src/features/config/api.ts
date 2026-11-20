@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { api } from "@/lib/api"
+import { api, ApiError } from "@/lib/api"
 import type { DirectorySetting, ForgeRepo, SavedRepo } from "@/features/forge/api"
 import { MAX_RULE_PATTERN, MAX_RULES } from "./settingsForm"
 
@@ -238,6 +238,9 @@ export interface ResolvedConfig {
 // The saved global config and what it resolves to before any repository.
 export interface GlobalConfig {
   settings: ConfigOverride
+  // What a save sends back: one made after the settings changed is refused
+  // with a 409, so a stale form cannot drop a rule added meanwhile.
+  revision: string
   warnings: string[]
   sources: Record<string, string>
   config: EffectiveConfig
@@ -264,6 +267,8 @@ export function useConfigSchema() {
   })
 }
 
+const isConflict = (err: unknown) => err instanceof ApiError && err.status === 409
+
 export function useGlobalConfig() {
   return useQuery({
     queryKey: ["global-config"],
@@ -274,12 +279,16 @@ export function useGlobalConfig() {
 export function useSaveGlobalConfig() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (settings: ConfigOverride) =>
-      api<GlobalConfig>("/config/global", { method: "PUT", body: JSON.stringify({ settings }) }),
+    mutationFn: ({ settings, revision }: { settings: ConfigOverride; revision: string }) =>
+      api<GlobalConfig>("/config/global", { method: "PUT", body: JSON.stringify({ settings, revision }) }),
     onSuccess: (data) => {
       queryClient.setQueryData(["global-config"], data)
       // Every repository's effective config sits on top of the global one.
       queryClient.invalidateQueries({ queryKey: ["repo-config"] })
+    },
+    // Someone saved first: fetch their settings, so Discard starts from them.
+    onError: (err) => {
+      if (isConflict(err)) queryClient.invalidateQueries({ queryKey: ["global-config"] })
     },
   })
 }
@@ -328,11 +337,17 @@ export function useRemoveDirectory() {
 export function useSaveRepoSettings() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ repoId, settings }: { repoId: string; settings: ConfigOverride }) =>
-      api<{ repo: SavedRepo }>(`/repos/${repoId}`, { method: "PATCH", body: JSON.stringify({ settings }) }),
+    mutationFn: ({ repoId, settings, settingsRevision }: { repoId: string; settings: ConfigOverride; settingsRevision: string }) =>
+      api<{ repo: SavedRepo }>(`/repos/${repoId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ settings, settingsRevision }),
+      }),
     onSuccess: (_data, { repoId }) => {
       queryClient.invalidateQueries({ queryKey: ["repos"] })
       queryClient.invalidateQueries({ queryKey: ["repo-config", repoId] })
+    },
+    onError: (err) => {
+      if (isConflict(err)) queryClient.invalidateQueries({ queryKey: ["repos"] })
     },
   })
 }

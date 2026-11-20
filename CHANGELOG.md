@@ -10,6 +10,100 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Added
 
+- Rule suggestions learned from review history. Off by default; owners and
+  admins turn it on from the new **Rule suggestions** page (Workspace). While
+  on, comments people with push access leave on changed lines are stored
+  (on GitHub, checked against the commenter's repository role, so a
+  read-only or triage collaborator's comments are not kept)
+  (`review_comments`) from the GitHub and GitLab webhooks already received,
+  skipping bots (on GitLab, whose webhook does not mark them, access token
+  users and service accounts are recognised by the users API's bot flag,
+  asked only for a comment that would otherwise be kept), commands,
+  Sentryward's own threads (recognised by the thread
+  root's marker when the posted-comment record no longer names it),
+  excluded reviewers and comments not anchored to a current new-side line
+  (outdated comments, GitLab notes on removed lines), which are skipped before
+  the commenter's permissions are looked up. A comment is stored with the
+  forge's authoring time (clamped to now), not its delivery time, so a late or
+  redelivered comment ages from when it was written; one already past the
+  90-day history window or the workspace's retention period is not stored at
+  all. The opt-in and exclusions are checked again under a lock
+  on the workspace just before a comment is stored, so a comment arriving while
+  the feature is turned off is never kept. The excluded-reviewers list
+  (`workspaces.rule_suggestions_excluded_reviewers`) is `NOT NULL`, so a
+  `NULL` written outside the app is refused instead of crashing comment
+  storage or the settings page. A diff comment that cannot be stored for a
+  reason a retry could fix (a permission lookup the forge failed, a database
+  error) fails the webhook delivery with a 500 after any reply handling has
+  run, on GitHub (a reply in a person's own thread included) and GitLab alike,
+  so it shows as failed and can be redelivered. One that would fail the same
+  way every time (a value the database refuses, a permission lookup the
+  connection may not make) is logged and the delivery succeeds, so GitLab does
+  not disable the hook, and automatic reviews with it, over a comment that can
+  never be kept. NUL characters are removed from a comment and its path
+  before storing, as Postgres text cannot hold them.
+  Once a week per workspace (or on **Check now**, at most hourly, counted from
+  the request as well as the last run so a queued check cannot be requested
+  again; `workspaces.rule_suggestions_requested_at`) the worker
+  groups the last 90 days (or the workspace's privacy retention period, when
+  shorter) of comments and false-positive or intentional dismissals, and when
+  something recurs across at least two changes and the
+  minimum evidence, asks the workspace's review model for at most five rules
+  (audited as `rule_suggest`, privacy restrictions applied). Drafts with an
+  invalid rule, a taken id (including any discarded suggestion's), a likeness
+  to any discarded suggestion under a new id (the same pattern, an id whose
+  words all appear in the other's, or a near-identical first sentence) or too
+  little evidence are dropped. The prompt lists the 100 most recently
+  discarded rules by their first sentence; the likeness check covers every
+  one. Each
+  comment or dismissal backs one suggestion at most. Suggestions wait for an
+  admin, who can edit one and approve it into the global settings or a
+  repository's own settings through the same checks as a manual save, or
+  discard it. Approving into the global settings is refused (`rule.id` field
+  error) when the rule would take the id of a repository or folder rule, which
+  global rules would silently replace; repositories already left out by the
+  global rules stay a config page warning and do not block it. New endpoints under `/api/rule-suggestions` (`/counts` feeds the
+  nav badge without loading the list); review comments and the suggestion
+  excerpts quoting them are deleted after 90 days, by privacy retention, and
+  when the feature is turned off, and an excluded reviewer's go with them.
+  Each excerpt expires by the age of the comment or dismissal it quotes, not
+  the suggestion's, and the retention log counts each excerpt trimmed (not
+  each suggestion touched), including for workspaces without a privacy period.
+  A run saves its suggestions only after re-reading the opt-in under the same
+  workspace lock, so turning the feature off or excluding a reviewer while the
+  model is answering never brings back deleted comments: a run turned off
+  mid-call saves nothing, and a suggestion citing a comment deleted meanwhile
+  is dropped. A run also re-checks that the feature is still on, and that its
+  claim has not been replaced, just before the model call and every 15 seconds
+  while it runs, so a run turned off after it was claimed makes no billed
+  request, or has its request (and fallbacks) aborted. Each claim carries a
+  run token (`workspaces.rule_suggestions_run_token`) that turning the feature
+  off clears, so a run stays stopped even when the feature is turned back on
+  before it checks again. Before saving, a run also locks every comment and dismissal it
+  cites, so retention cannot delete one until the suggestion is stored, and
+  drops any suggestion whose evidence is gone, no longer dismissed, or already
+  past the retention cutoff in force at save time (a period shortened during
+  the model call applies too), so no excerpt outlives what it quotes.
+  Drafts are validated under that same lock, against the evidence minimum and
+  the rule ids taken at that moment, so a minimum raised or a rule approved
+  under the drafted id while the model is answering drops the draft.
+  The list (`GET /api/rule-suggestions`) is paged, 100 at a time, newest
+  first: pass the returned `nextCursor` as `?cursor=` for the next page, and
+  the page offers **Load more**. A cursor whose timestamp is out of range is
+  refused with a 400. A page holds only suggestions still in the
+  requested status; one decided while the page loads is left out. Worker shutdown waits for a running suggestion pass before
+  disconnecting from the database.
+  Removing a repository deletes its pending suggestions, and removes its
+  excerpts and cited comment and dismissal ids from other suggestions. Excerpts
+  record their repository's id and are matched by it, so a repository renamed
+  after drafting does not leave its excerpts behind under its old name; older
+  excerpts without the id go when their name is the repository's or matches no
+  other repository in the workspace. The page leads with the suggestions: settings fold into a header showing
+  whether learning is on, the last check and **Check now** (open by default only
+  while off). Cards carry the rule's severity colour, the rationale and a
+  foldable evidence summary. Discarding asks for confirmation, and approving into
+  a repository that follows the global settings offers the global settings
+  instead.
 - Folder settings for monorepos. On the Review settings page a repository can
   have folders (`repositories.directories`) with settings of their own, edited
   like the repository's and inheriting from them. A review uses a folder only
@@ -399,8 +493,19 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `sentryward/review` status, turn on Post commit status (`output.post_check`)
   in the global config or the repository settings before upgrading, or merges
   wait for a status that is no longer posted.
+- API callers that save settings must now send the revision they read:
+  `revision` (from `GET /api/config/global`) on `PUT /api/config/global`, and
+  `settingsRevision` (from `GET /api/repos`) on a `PATCH /api/repos/:id` that
+  sends `settings`. Saves without one are refused with a 409 asking to reload
+  the page (what a settings page loaded before upgrading shows when it saves).
 
 ### Changed
+
+- Replies on Sentryward's GitHub inline threads (questions and
+  `/sentryward ignore`) now require push access by the commenter's
+  repository role (admin, maintain or write) instead of their author
+  association, which counts read-only and triage collaborators as
+  collaborators. This matches GitLab, which already required Developer.
 
 - A committable suggestion that repeats the lines it would replace is
   removed before publishing, along with its fix rationale; the finding is
@@ -495,6 +600,32 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 
 ### Fixed
 
+- Saving the global config or a repository's settings from a page loaded
+  before someone else changed them (another admin's save, or an approved rule
+  suggestion) is refused with "changed since the page loaded; reload and try
+  again", instead of silently replacing their changes with the stale copy.
+  `GET`/`PUT /api/config/global` return a `revision` and the repository list
+  a `settingsRevision`, derived from the saved settings, and a save must send
+  them back: `PUT /api/config/global` requires `revision`, and
+  `PATCH /api/repos/:id` requires `settingsRevision` whenever it sends
+  `settings` (a 409 asking to reload otherwise), so no save can replace a rule approved since
+  its settings were read.
+- On GitHub, `/sentryward review` now requires push access to the repository,
+  checked by the commenter's repository role, as for thread replies. A comment's
+  author association does not tell read and triage collaborators from writers,
+  so they could previously start a review billed to the workspace. A
+  connection that may not read the commenter's role refuses the command
+  (`not_allowed`); a rate limit or forge outage fails the delivery with a 500
+  so it can be redelivered.
+- Saving a repository's settings or a folder checks its rules against the
+  global settings read under a lock on the workspace, the one approvals and
+  global saves take, so a global rule added at the same moment can no longer
+  slip past the check and silently replace a repository or folder rule.
+- Switching a repository from the global settings to its own now takes that
+  same workspace lock and checks its saved rules against the global settings,
+  as saving them would. A global rule approved at the same moment could
+  previously see the repository as still following the global settings and
+  silently replace one of its rules.
 - The Recent reviews lists on the Home and Usage pages label an untitled
   GitLab merge request as `Merge request !42` and an untitled GitHub pull
   request as `Pull request #42`, instead of `#42`, and the Usage list writes a

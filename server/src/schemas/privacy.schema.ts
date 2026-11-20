@@ -35,7 +35,7 @@ export const instanceSettingsSchema = privacyLayerSchema.extend({
 
 const filters = {
   provider: z.enum(PROVIDERS).optional(),
-  purpose: z.enum(["review", "walkthrough", "verify", "probe", "reply", "test"]).optional(),
+  purpose: z.enum(["review", "walkthrough", "verify", "probe", "reply", "rule_suggest", "test"]).optional(),
   outcome: z.enum(["ok", "failed"]).optional(),
   q: z.string().trim().max(200).optional(),
   from: z.coerce.date().optional(),

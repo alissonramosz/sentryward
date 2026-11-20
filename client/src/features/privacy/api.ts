@@ -29,7 +29,7 @@ export interface WorkspacePrivacy {
   effective: { localOnly: boolean; retentionDays: number | null }
 }
 
-export type AuditPurpose = "review" | "walkthrough" | "verify" | "probe" | "reply" | "test"
+export type AuditPurpose = "review" | "walkthrough" | "verify" | "probe" | "reply" | "rule_suggest" | "test"
 
 export interface AuditEntry {
   id: string

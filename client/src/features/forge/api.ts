@@ -74,6 +74,9 @@ export interface ForgeRepo {
   webUrl: string
   enabled: boolean
   settings: ConfigOverride
+  // Sent back when saving `settings`: a save made after they changed is
+  // refused with a 409, so a stale form cannot drop a rule added meanwhile.
+  settingsRevision: string
   // Folders with settings of their own; a review uses one only when every
   // file it changes is inside it.
   directories: DirectorySetting[]
@@ -115,6 +118,7 @@ export interface SavedRepo {
   fullPath: string
   enabled: boolean
   settings: ConfigOverride
+  settingsRevision: string
   followGlobal: boolean
 }
 

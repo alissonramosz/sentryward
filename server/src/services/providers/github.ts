@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { env } from "../../config/env.ts";
 import { HttpError } from "../../lib/httpError.ts";
+import { once } from "../../lib/once.ts";
 import { prisma } from "../../lib/prisma.ts";
 import { parseJson, parseReviewCommand, REVIEW_COMMAND, safeEqual } from "../../lib/webhook.ts";
 import type { ForgeConnection } from "../../generated/prisma/client.ts";
@@ -17,16 +18,13 @@ import {
 } from "../../worker/queue.ts";
 import { recordChangeState, recordChangeStateQuietly } from "../backlog.ts";
 import { getGitHubApp, githubConfigured } from "../githubApp.ts";
+import { recordReviewComment } from "../reviewComments.ts";
 import { recordThreadReply } from "../threadReplies.ts";
 import type { HeaderReader, ProviderDefinition, RepoWithConnection, WebhookOutcome } from "./types.ts";
 import { decryptToken } from "./token.ts";
 
 // "synchronize" brings new commits; the rest make a change reviewable.
 const PR_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
-// Who may ask for a review in a comment, or act on a finding by replying to
-// it: people who can already push.
-const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-
 // The uninstall webhook cleared the installation id; the connection is kept
 // for its history until a reinstall reattaches it. An HttpError, so it reaches
 // the client as is whether thrown before or inside a forge call.
@@ -58,9 +56,15 @@ export interface GitHubPayload {
     id?: number;
     body: string;
     author_association: string;
-    user?: { login: string };
+    // type is "Bot" for apps, Sentryward's own included.
+    user?: { login: string; type?: string };
     // Review comments only: the thread's root comment, set on every reply.
     in_reply_to_id?: number;
+    // Review comments only: the file and the line on the new side (null when
+    // the comment is on a removed line or the line no longer exists).
+    path?: string;
+    line?: number | null;
+    created_at?: string;
   };
   sender?: { login: string };
 }
@@ -118,14 +122,16 @@ function isReviewCommand(event: string | undefined, payload: GitHubPayload): boo
   );
 }
 
-// A reply in an inline thread. Whether the thread is Sentryward's is only known
-// once its root comment is read.
-function isThreadReply(event: string | undefined, payload: GitHubPayload): boolean {
+// A new comment on a diff line: rule suggestion evidence when its workspace
+// learns rules (reviewComments.ts), and, when it has in_reply_to_id, a reply
+// in an inline thread. Whether that thread is Sentryward's is only known once
+// its root comment is read.
+function isDiffComment(event: string | undefined, payload: GitHubPayload): boolean {
   return (
     event === "pull_request_review_comment" &&
     payload.action === "created" &&
     Boolean(payload.pull_request) &&
-    Boolean(payload.comment?.id && payload.comment.in_reply_to_id)
+    Boolean(payload.comment?.id)
   );
 }
 
@@ -139,7 +145,8 @@ export function isGithubReviewEvent(event: string | undefined, payload: GitHubPa
     isPullRequestPush(event, payload) ||
     isPullRequestClose(event, payload) ||
     isReviewCommand(event, payload) ||
-    isThreadReply(event, payload)
+    // Covers thread replies too.
+    isDiffComment(event, payload)
   );
 }
 
@@ -186,26 +193,83 @@ export async function handleGithubEvent(
     return { body: result.queued ? { outcome: "queued", reviewId: result.job.id } : { outcome: result.reason } };
   }
 
-  if (isThreadReply(event, payload)) {
+  if (isDiffComment(event, payload)) {
     const comment = payload.comment!;
-    return recordThreadReply({
+    const number = payload.pull_request!.number;
+    const threadId = comment.in_reply_to_id ? String(comment.in_reply_to_id) : undefined;
+    const forge = adapterFor(repo.connection);
+    // The repository role, not author_association, which does not tell read
+    // collaborators from writers. One lookup per delivery serves both handlers.
+    const login = comment.user?.login;
+    const allowed = once(async () => (login ? forge.canPush(repo.fullPath, login) : false));
+    // Both handlers may need the thread's root; one forge call serves them.
+    const threadRoot = threadId ? once(() => forge.getThreadRoot({ project: repo.fullPath, number }, threadId)) : undefined;
+    const stored = await recordReviewComment({
       repo,
-      forge: adapterFor(repo.connection),
-      number: payload.pull_request!.number,
-      threadId: String(comment.in_reply_to_id),
+      number,
+      commentId: String(comment.id),
+      threadId,
+      threadRoot,
+      author: comment.user?.login,
+      body: comment.body ?? "",
+      createdAt: comment.created_at,
+      file: comment.path,
+      line: comment.line,
+      isSelf: comment.user?.type === "Bot",
+      allowed,
+    });
+    if (!threadId) {
+      // Nothing else rides on this delivery, so a failure fails it: GitHub
+      // shows it as failed and it can be redelivered, instead of the evidence
+      // being lost behind a success.
+      if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
+      return { body: { outcome: stored === "stored" ? "recorded" : "ignored" } };
+    }
+    // A reply is handled first, then a failure to store the comment fails the
+    // delivery as above (a reply in a person's own thread is evidence too).
+    // A redelivery is safe: both handlers answer "duplicate" for what they
+    // already recorded.
+    const reply = await recordThreadReply({
+      repo,
+      forge,
+      number,
+      threadId,
       commentId: String(comment.id),
       actor: comment.user?.login,
       body: comment.body,
       botLogin: repo.connection.kind !== "token",
-      allowed: async () => TRUSTED.has(comment.author_association),
+      allowed,
+      threadRoot,
     });
+    if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
+    return reply;
   }
 
-  if (!TRUSTED.has(payload.comment!.author_association)) {
-    return { body: { outcome: "not_allowed" } };
+  // Only people who can already push may start a (billed) review. Checked by
+  // repository role, as for thread replies: author_association COLLABORATOR
+  // also covers read and triage collaborators.
+  const forge = adapterFor(repo.connection);
+  const login = payload.comment!.user?.login;
+  let allowed = false;
+  if (login) {
+    try {
+      allowed = await forge.canPush(repo.fullPath, login);
+    } catch (err) {
+      // A connection that may not read collaborator permissions cannot show
+      // the commenter may push, so the command is refused like an outsider's.
+      // Anything else (rate limit, forge down) fails the delivery cleanly so
+      // it can be redelivered.
+      if (err instanceof ForgeError && err.status === 403 && !err.rateLimited) {
+        console.warn("[webhook] cannot read %s's permission on %s; refusing the review command", login, repo.fullPath);
+      } else {
+        console.error("[webhook] permission lookup for the review command on %s failed", repo.fullPath, err);
+        return { status: 500, body: { outcome: "failed" } };
+      }
+    }
   }
+  if (!allowed) return { body: { outcome: "not_allowed" } };
   const number = payload.issue!.number;
-  const head = await adapterFor(repo.connection).getChangeHead(repo.fullPath, number);
+  const head = await forge.getChangeHead(repo.fullPath, number);
   const job = await enqueue({
     repositoryId: repo.id,
     number,

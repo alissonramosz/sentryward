@@ -25,6 +25,7 @@ const RegisterPage = lazy(() => import("@/pages/auth/RegisterPage").then((m) => 
 const RepositoriesPage = lazy(() => import("@/pages/forge/RepositoriesPage").then((m) => ({ default: m.RepositoriesPage })))
 const ResetPasswordPage = lazy(() => import("@/pages/auth/ResetPasswordPage").then((m) => ({ default: m.ResetPasswordPage })))
 const ReviewDetailPage = lazy(() => import("@/pages/reviews/ReviewDetailPage").then((m) => ({ default: m.ReviewDetailPage })))
+const RuleSuggestionsPage = lazy(() => import("@/pages/rule-suggestions/RuleSuggestionsPage").then((m) => ({ default: m.RuleSuggestionsPage })))
 const ReviewsPage = lazy(() => import("@/pages/reviews/ReviewsPage").then((m) => ({ default: m.ReviewsPage })))
 const SettingsPage = lazy(() => import("@/pages/settings/SettingsPage").then((m) => ({ default: m.SettingsPage })))
 const BenchmarksPage = lazy(() => import("@/pages/benchmarks/BenchmarksPage").then((m) => ({ default: m.BenchmarksPage })))
@@ -68,6 +69,7 @@ export function App() {
               <Route path="/repositories" element={<RepositoriesPage />} />
               <Route path="/connections" element={<ConnectionsRedirect />} />
               <Route path="/configuration" element={<ConfigurationPage />} />
+              <Route path="/rule-suggestions" element={<RuleSuggestionsPage />} />
               <Route path="/llm-connections" element={<LlmConnectionsPage />} />
               <Route path="/notifications" element={<NotificationsPage />} />
               <Route path="/settings" element={<SettingsPage />} />

@@ -3,9 +3,15 @@ import { MAX_RULE_PATTERN_CHARS, MAX_RULES, dashboardOverrideSchema } from "../r
 import { forgeProviderSchema } from "../review/core/models.ts";
 
 // Replaces the global config as a whole; an empty object resets it to the
-// profile and the defaults.
+// profile and the defaults. `revision` is the one the form loaded: a save
+// made after the settings changed is refused (lib/settingsRevision.ts).
+// Required, as a write without one could replace a rule approved since the
+// caller read the settings, but checked in the controller rather than here:
+// a page loaded before revisions existed then gets the 409 "reload" answer
+// a stale page gets, not a validation error naming a field it never shows.
 export const updateGlobalConfigSchema = z.object({
   settings: dashboardOverrideSchema,
+  revision: z.string().max(64).optional(),
 });
 
 // The display preview: `base` is what the form inherits (the profile and

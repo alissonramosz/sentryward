@@ -94,6 +94,7 @@ const effective = {
 
 const globalConfig = (settings: Record<string, unknown> = {}, sources: Record<string, string> = {}) => ({
   settings,
+  revision: "g1",
   warnings: [],
   config: effective,
   sources: { profile: "default", "llm.model": "default", "review.blockOn": "default", ...sources },
@@ -119,6 +120,7 @@ const repo = (id: string, fullPath: string, extra: Record<string, unknown> = {})
   webUrl: `https://gitlab.com/${fullPath}`,
   enabled: true,
   settings: {},
+  settingsRevision: `${id}-rev`,
   followGlobal: true,
   ...extra,
 })
@@ -279,9 +281,35 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
 
     await waitFor(() =>
-      expect(body).toEqual({ settings: { llm: { model: "openai/gpt-5", connection: "openai" } } }),
+      expect(body).toEqual({ revision: "g1", settings: { llm: { model: "openai/gpt-5", connection: "openai" } } }),
     )
     expect(await screen.findByText("Global config saved")).toBeInTheDocument()
+  })
+
+  it("refuses to save over global settings that changed since the page loaded", async () => {
+    let revision: unknown
+    let refetched = false
+    mockApi(
+      globalRoutes({
+        "GET /api/config/global": () => {
+          if (revision) refetched = true
+          return jsonResponse(200, globalConfig())
+        },
+        "PUT /api/config/global": (init?: RequestInit) => {
+          revision = JSON.parse(String(init?.body)).revision
+          return jsonResponse(409, { message: "The global settings changed since the page loaded; reload and try again" })
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration" })
+
+    expect(await screen.findByText("Effective: anthropic/claude-sonnet-5-5")).toBeInTheDocument()
+    await selectOpenAiConnection()
+    await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
+
+    expect(await screen.findByText(/changed since the page loaded/)).toBeInTheDocument()
+    expect(revision).toBe("g1")
+    await waitFor(() => expect(refetched).toBe(true))
   })
 
   it("shows real values instead of inherit in the global config and only saves changes", async () => {
@@ -327,6 +355,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
 
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: { profile: "strict", llm: { connection: "openai" }, output: { walkthrough: false } },
       }),
     )
@@ -371,6 +400,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
 
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: {
           // "auto" is already the default context budget, so it is not pinned.
           llm: {
@@ -475,6 +505,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
 
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: {
           llm: { connection: "openai" },
           output: {
@@ -540,6 +571,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
 
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: {
           llm: { connection: "openai" },
           review: { disableCache: true },
@@ -760,7 +792,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Reset to defaults" }))
 
-    await waitFor(() => expect(body).toEqual({ settings: { llm: { connection: "openai" } } }))
+    await waitFor(() => expect(body).toEqual({ revision: "g1", settings: { llm: { connection: "openai" } } }))
   })
 
   it("switches between the global config and a repository on the same tab", async () => {
@@ -940,7 +972,7 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     await userEvent.type(screen.getByLabelText("Model"), "openai/gpt-5")
     await userEvent.click(screen.getByRole("button", { name: "Save settings" }))
 
-    await waitFor(() => expect(patched).toEqual({ settings: { llm: { model: "openai/gpt-5" } } }))
+    await waitFor(() => expect(patched).toEqual({ settings: { llm: { model: "openai/gpt-5" } }, settingsRevision: "r1-rev" }))
   })
 
   it("explains inherit in a repository and resets a saved override to the global value", async () => {
@@ -1120,6 +1152,7 @@ describe("Team rules", { timeout: 20_000 }, () => {
 
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: {
           llm: { connection: "openai" },
           rules: [
@@ -1199,6 +1232,7 @@ describe("Model pickers", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: { llm: { model: "openai/gpt-5", fallbackModels: ["openai/gpt-5-mini"], connection: "openai" } },
       }),
     )
@@ -1778,6 +1812,7 @@ describe("Display tab", { timeout: 20_000 }, () => {
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: {
           llm: { connection: "openai" },
           output: { inlineMinSeverity: "major", maxInlineComments: 5, summaryOnlyWithFindings: true },
@@ -2070,6 +2105,7 @@ describe("Display tab", { timeout: 20_000 }, () => {
     // Only what differs from the defaults is saved.
     await waitFor(() =>
       expect(body).toEqual({
+        revision: "g1",
         settings: {
           llm: { connection: "openai" },
           output: {
