@@ -253,8 +253,9 @@ export function validateSuggestions(
   return { suggestions, dropped };
 }
 
-// How evidence names its repository, in prompts and stored excerpts; deleting
-// a repository finds its excerpts by this too.
+// How evidence names its repository, in prompts and stored excerpts. A label
+// goes stale when the repository is renamed, so deletion matches excerpts by
+// repositoryId instead (stripRepositoryEvidence).
 export function repoLabel(repo: { host: string; fullPath: string }): string {
   return `${repo.host}/${repo.fullPath}`;
 }
@@ -265,8 +266,17 @@ export interface StoredEvidence {
   // Distinct changes cited, so the page can say "across N changes" after the
   // excerpts are trimmed.
   changes: number;
-  // `at` (ISO) is the source's time; excerpts stored before it existed lack it.
-  excerpts: { kind: EvidenceItem["kind"]; repository: string; number: number; file: string; text: string; at?: string }[];
+  // `at` (ISO) is the source's time; excerpts stored before it existed lack it,
+  // as they lack `repositoryId`.
+  excerpts: {
+    kind: EvidenceItem["kind"];
+    repositoryId?: string;
+    repository: string;
+    number: number;
+    file: string;
+    text: string;
+    at?: string;
+  }[];
 }
 
 // What a suggestion keeps of its evidence. Each excerpt is trimmed by
@@ -279,6 +289,7 @@ export function storedEvidence(items: EvidenceItem[]): StoredEvidence {
     changes: new Set(items.map(changeKey)).size,
     excerpts: items.map((item) => ({
       kind: item.kind,
+      repositoryId: item.repositoryId,
       repository: item.repository,
       number: item.number,
       file: item.file,

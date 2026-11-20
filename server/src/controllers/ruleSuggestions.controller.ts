@@ -127,11 +127,23 @@ async function stripCommentExcerpts(tx: Prisma.TransactionClient, workspaceId: s
 }
 
 // Drops a repository that is being deleted from the suggestions citing it:
-// its excerpts (people's words, matched by the label evidence names it with)
-// and the ids of its comments and findings, which go with it. Suggestions for
-// other repositories or the global settings keep the rest of their evidence.
-// Locked in id order, as stripCommentExcerpts does.
-export async function stripRepositoryEvidence(tx: Prisma.TransactionClient, repo: { id: string; host: string; fullPath: string }) {
+// its excerpts (people's words) and the ids of its comments and findings,
+// which go with it. Suggestions for other repositories or the global settings
+// keep the rest of their evidence. Locked in id order, as stripCommentExcerpts
+// does.
+//
+// Excerpts are matched by repositoryId, not by their label: a repository
+// renamed after drafting would keep its words under the old label. Excerpts
+// stored before they carried the id can only be matched by label, so in a
+// suggestion citing this repository one goes when its label is this
+// repository's or names no other repository of the workspace (a stale label,
+// most likely this one's from before a rename). That errs on removing words:
+// another renamed repository's old excerpt may go too, its ids and counts stay.
+export async function stripRepositoryEvidence(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  repo: { id: string; host: string; fullPath: string },
+) {
   const [comments, findings] = [
     await tx.reviewComment.findMany({ where: { repositoryId: repo.id, suggestionId: { not: null } }, select: { id: true, suggestionId: true } }),
     await tx.finding.findMany({ where: { repositoryId: repo.id, suggestionId: { not: null } }, select: { id: true, suggestionId: true } }),
@@ -142,6 +154,15 @@ export async function stripRepositoryEvidence(tx: Prisma.TransactionClient, repo
     SELECT id, evidence FROM rule_suggestions WHERE id = ANY(${suggestionIds}::uuid[]) ORDER BY id FOR UPDATE
   `;
   const label = repoLabel(repo);
+  const others = await tx.repository.findMany({
+    where: { connection: { workspaceId }, id: { not: repo.id } },
+    select: { host: true, fullPath: true },
+  });
+  const otherLabels = new Set(others.map(repoLabel));
+  const isThisRepo = (excerpt: StoredEvidence["excerpts"][number] | null | undefined) =>
+    typeof excerpt?.repositoryId === "string"
+      ? excerpt.repositoryId === repo.id
+      : excerpt?.repository === label || !otherLabels.has(excerpt?.repository ?? "");
   const commentIds = new Set(comments.map((row) => row.id));
   const findingIds = new Set(findings.map((row) => row.id));
   for (const row of rows) {
@@ -149,7 +170,7 @@ export async function stripRepositoryEvidence(tx: Prisma.TransactionClient, repo
     if (!evidence || typeof evidence !== "object") continue;
     const next = {
       ...evidence,
-      ...(Array.isArray(evidence.excerpts) ? { excerpts: evidence.excerpts.filter((excerpt) => excerpt?.repository !== label) } : {}),
+      ...(Array.isArray(evidence.excerpts) ? { excerpts: evidence.excerpts.filter((excerpt) => !isThisRepo(excerpt)) } : {}),
       ...(Array.isArray(evidence.commentIds) ? { commentIds: evidence.commentIds.filter((id) => !commentIds.has(id)) } : {}),
       ...(Array.isArray(evidence.findingIds) ? { findingIds: evidence.findingIds.filter((id) => !findingIds.has(id)) } : {}),
     };

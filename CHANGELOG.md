@@ -94,7 +94,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   requested status; one decided while the page loads is left out. Worker shutdown waits for a running suggestion pass before
   disconnecting from the database.
   Removing a repository deletes its pending suggestions, and removes its
-  excerpts and cited comment and dismissal ids from other suggestions. The page leads with the suggestions: settings fold into a header showing
+  excerpts and cited comment and dismissal ids from other suggestions. Excerpts
+  record their repository's id and are matched by it, so a repository renamed
+  after drafting does not leave its excerpts behind under its old name; older
+  excerpts without the id go when their name is the repository's or matches no
+  other repository in the workspace. The page leads with the suggestions: settings fold into a header showing
   whether learning is on, the last check and **Check now** (open by default only
   while off). Cards carry the rule's severity colour, the rationale and a
   foldable evidence summary. Discarding asks for confirmation, and approving into

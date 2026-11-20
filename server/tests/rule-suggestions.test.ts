@@ -635,6 +635,7 @@ describe("learning engine", () => {
     const stored = storedEvidence([item("c1"), item("d2", { kind: "dismissal", title: "Raw SQL", text: "ours" })]);
     expect(stored).toMatchObject({ findingIds: ["id-d2"], commentIds: ["id-c1"], changes: 2 });
     expect(stored.excerpts[1]!.text).toBe("Raw SQL: ours");
+    expect(stored.excerpts[0]!.repositoryId).toBe("r1");
     expect(stored.excerpts[0]!.at).toBe("2026-01-02T03:04:05.000Z");
   });
 
@@ -1209,7 +1210,7 @@ describe("rule suggestions API", () => {
     const other = await prisma.repository.create({
       data: { connectionId: repo.connectionId, provider: "github", host: "github.com", fullPath: "acme/api", externalId: "901", defaultBranch: "main", enabled: true },
     });
-    const excerpt = (repository: string, kind: string, text: string) => ({ kind, repository, number: 1, file: "a.ts", text });
+    const excerpt = (repositoryId: string, repository: string, kind: string, text: string) => ({ kind, repositoryId, repository, number: 1, file: "a.ts", text });
     const row = await prisma.ruleSuggestion.create({
       data: {
         workspaceId,
@@ -1221,9 +1222,9 @@ describe("rule suggestions API", () => {
           commentIds: [],
           changes: 3,
           excerpts: [
-            excerpt("github.com/acme/web", "comment", "web comment"),
-            excerpt("github.com/acme/web", "dismissal", "web dismissal"),
-            excerpt("github.com/acme/api", "comment", "api comment"),
+            excerpt(repo.id, "github.com/acme/web", "comment", "web comment"),
+            excerpt(repo.id, "github.com/acme/web", "dismissal", "web dismissal"),
+            excerpt(other.id, "github.com/acme/api", "comment", "api comment"),
           ],
         },
       },
@@ -1252,6 +1253,50 @@ describe("rule suggestions API", () => {
     expect(evidence.excerpts.map((e) => e.text)).toEqual(["api comment"]);
     expect(evidence.commentIds).toEqual([b.id]);
     expect(evidence.findingIds).toEqual([]);
+  });
+
+  // Each case: excerpts of a suggestion citing a comment of the deleted
+  // repository, and the texts left once it is deleted.
+  async function excerptsAfterDelete(excerpts: (repoId: string, otherId: string) => Record<string, string | number>[]) {
+    const repo = await githubRepo();
+    const other = await prisma.repository.create({
+      data: { connectionId: repo.connectionId, provider: "github", host: "github.com", fullPath: "acme/api", externalId: "901", defaultBranch: "main", enabled: true },
+    });
+    const row = await prisma.ruleSuggestion.create({
+      data: {
+        workspaceId,
+        rule: RULE,
+        rationale: "",
+        model: "m",
+        evidence: { findingIds: [], commentIds: [], changes: 2, excerpts: excerpts(repo.id, other.id) },
+      },
+    });
+    await prisma.reviewComment.create({
+      data: { repositoryId: repo.id, number: 1, forgeCommentId: "1", author: "alice", body: LONG, file: "a.ts", suggestionId: row.id },
+    });
+    vi.stubGlobal("fetch", fetchStub([]).fetch);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect((await request(app).delete(`/api/repos/${repo.id}`).set("Cookie", cookie)).status).toBe(204);
+    const evidence = (await prisma.ruleSuggestion.findUniqueOrThrow({ where: { id: row.id } })).evidence as { excerpts: { text: string }[] };
+    return evidence.excerpts.map((e) => e.text);
+  }
+
+  it("drops a deleted repository's excerpts stored under the label it had before a rename", async () => {
+    const texts = await excerptsAfterDelete((repoId, otherId) => [
+      { kind: "comment", repositoryId: repoId, repository: "github.com/acme/old-web", number: 1, file: "a.ts", text: "renamed comment" },
+      { kind: "comment", repositoryId: otherId, repository: "github.com/acme/api", number: 1, file: "a.ts", text: "api comment" },
+    ]);
+    expect(texts).toEqual(["api comment"]);
+  });
+
+  it("drops older excerpts without a repository id by label, or when no other repository has that label", async () => {
+    const texts = await excerptsAfterDelete(() => [
+      { kind: "comment", repository: "github.com/acme/web", number: 1, file: "a.ts", text: "current label" },
+      { kind: "comment", repository: "github.com/acme/old-web", number: 1, file: "a.ts", text: "stale label" },
+      { kind: "comment", repository: "github.com/acme/api", number: 1, file: "a.ts", text: "api comment" },
+    ]);
+    expect(texts).toEqual(["api comment"]);
   });
 
   it("approves into the global settings, edited, once", async () => {

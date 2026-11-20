@@ -9,6 +9,7 @@ export type SuggestionStatus = "pending" | "approved" | "discarded"
 
 export interface SuggestionExcerpt {
   kind: "dismissal" | "comment"
+  repositoryId?: string
   repository: string
   number: number
   file: string

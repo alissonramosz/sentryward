@@ -392,7 +392,7 @@ export async function deleteRepo(req: Request, res: Response) {
   await prisma.$transaction(async (tx) => {
     await dropRepositoriesFromTargets(tx, [id]);
     await tx.ruleSuggestion.deleteMany({ where: { repositoryId: id, status: "pending" } });
-    await stripRepositoryEvidence(tx, { id, host: repo.host, fullPath: repo.fullPath });
+    await stripRepositoryEvidence(tx, req.workspaceId!, { id, host: repo.host, fullPath: repo.fullPath });
     await tx.repository.delete({ where: { id } });
   });
   res.status(204).end();
