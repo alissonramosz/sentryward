@@ -163,7 +163,7 @@ export const gitlabProvider: ProviderDefinition = {
         // Rule suggestion evidence when the workspace learns rules. Every note
         // of a discussion arrives with its id, so a discussion Sentryward opened
         // is skipped there, as are its own notes by their markers.
-        await recordReviewComment({
+        const stored = await recordReviewComment({
           repo,
           number,
           commentId: String(attrs.id),
@@ -176,7 +176,7 @@ export const gitlabProvider: ProviderDefinition = {
           isSelf: false,
           allowed,
         });
-        return recordThreadReply({
+        const reply = await recordThreadReply({
           repo,
           forge,
           number,
@@ -188,6 +188,12 @@ export const gitlabProvider: ProviderDefinition = {
           allowed,
           threadRoot,
         });
+        // Every GitLab diff note is in a discussion, so unlike GitHub a failure
+        // to store it cannot wait for a delivery without a thread. The reply is
+        // handled first, then the delivery fails so GitLab can redeliver it:
+        // both handlers answer "duplicate" for what they already recorded.
+        if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
+        return reply;
       }
 
       return { body: { outcome: "ignored" } };

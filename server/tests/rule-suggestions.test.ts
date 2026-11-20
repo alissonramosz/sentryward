@@ -319,6 +319,35 @@ describe("capturing review comments", () => {
     expect(await prisma.reviewComment.count()).toBe(1);
   });
 
+  it("fails the delivery when a GitLab diff note cannot be recorded, so it can be redelivered", async () => {
+    const repo = await gitlabRepo();
+    await enable();
+    vi.stubGlobal("fetch", fetchStub([{ url: /\/projects\/77\/members\/all\/5$/, status: 502, body: { message: "Bad Gateway" } }]).fetch);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const note = {
+      object_kind: "note",
+      user: { id: 5, username: "alice" },
+      object_attributes: {
+        id: 1,
+        noteable_type: "MergeRequest",
+        type: "DiffNote",
+        discussion_id: "disc9",
+        note: LONG,
+        position: { new_path: "lib/db.rb", new_line: 4 },
+      },
+      merge_request: { iid: 7, last_commit: { id: "glsha" } },
+    };
+
+    const failed = await sendGitlab(repo.id, note);
+    expect(failed.status).toBe(500);
+    expect(failed.body.outcome).toBe("failed");
+    expect(await prisma.reviewComment.count()).toBe(0);
+
+    vi.stubGlobal("fetch", fetchStub([{ url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } }]).fetch);
+    expect((await sendGitlab(repo.id, note)).body.outcome).toBe("ignored");
+    expect(await prisma.reviewComment.findMany()).toMatchObject([{ number: 7, forgeCommentId: "1" }]);
+  });
+
   it("asks GitLab once per note who the author is, though both handlers need it", async () => {
     const repo = await gitlabRepo();
     await enable();
@@ -601,6 +630,20 @@ describe("worker run", () => {
     expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
 
+  // Settles only once aborted, as a provider would stop streaming. The signal
+  // may already be aborted: the watcher can fire during the awaited saves, and
+  // an abort event is not replayed to a late listener.
+  function untilAborted(signal: AbortSignal, onAbort: () => void): Promise<never> {
+    return new Promise((_, reject) => {
+      const stop = () => {
+        onAbort();
+        reject(signal.reason);
+      };
+      if (signal.aborted) return stop();
+      signal.addEventListener("abort", stop, { once: true });
+    });
+  }
+
   it("aborts the model call when suggestions are turned off while it runs", async () => {
     const repo = await githubRepo();
     await enable({ ruleSuggestionsMinEvidence: 3 });
@@ -613,12 +656,8 @@ describe("worker run", () => {
         .set("Cookie", cookie)
         .send({ enabled: false, minEvidence: 3, excludedReviewers: [] });
       expect(res.status).toBe(200);
-      // Answers only once aborted, as a provider would stop streaming.
-      return new Promise((_, reject) => {
-        req.abortSignal!.addEventListener("abort", () => {
-          aborted = true;
-          reject(req.abortSignal!.reason);
-        });
+      return untilAborted(req.abortSignal!, () => {
+        aborted = true;
       });
     };
 
@@ -680,11 +719,8 @@ describe("worker run", () => {
       // A poll may or may not land between the two saves; the run must stop
       // either way, as the abort is what ends this call.
       await offAndOnAgain();
-      return new Promise((_, reject) => {
-        req.abortSignal!.addEventListener("abort", () => {
-          aborted = true;
-          reject(req.abortSignal!.reason);
-        });
+      return untilAborted(req.abortSignal!, () => {
+        aborted = true;
       });
     };
 

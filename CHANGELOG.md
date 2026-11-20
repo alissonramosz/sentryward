@@ -26,7 +26,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   storage or the settings page. On GitHub, a top-level diff comment that cannot
   be stored (a failed permission lookup or database error) fails the webhook
   delivery with a 500, so it shows as failed and can be redelivered; a reply
-  in a thread still goes on to the reply handling.
+  in a thread still goes on to the reply handling. On GitLab, where every
+  diff note is in a discussion, a note that cannot be stored fails the
+  delivery with a 500 after the reply handling has run.
   Once a week per workspace (or on **Check now**, at most hourly, counted from
   the request as well as the last run so a queued check cannot be requested
   again; `workspaces.rule_suggestions_requested_at`) the worker
