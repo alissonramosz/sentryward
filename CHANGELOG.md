@@ -17,8 +17,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   read-only or triage collaborator's comments are not kept)
   (`review_comments`) from the GitHub and GitLab webhooks already received,
   skipping bots, commands, Sentryward's own threads (recognised by the thread
-  root's marker when the posted-comment record no longer names it) and
-  excluded reviewers. The opt-in and exclusions are checked again under a lock
+  root's marker when the posted-comment record no longer names it),
+  excluded reviewers and comments not anchored to a current new-side line
+  (outdated comments, GitLab notes on removed lines), which are skipped before
+  the commenter's permissions are looked up. The opt-in and exclusions are checked again under a lock
   on the workspace just before a comment is stored, so a comment arriving while
   the feature is turned off is never kept. The excluded-reviewers list
   (`workspaces.rule_suggestions_excluded_reviewers`) is `NOT NULL`, so a

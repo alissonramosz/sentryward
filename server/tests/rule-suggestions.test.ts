@@ -217,6 +217,8 @@ describe("capturing review comments", () => {
       commentEvent(LONG, { author_association: "COLLABORATOR", user: { login: "dave", type: "User" } }),
       commentEvent(LONG, { author_association: "COLLABORATOR", user: { login: "erin", type: "User" } }),
       commentEvent(LONG, { user: { login: "carol", type: "User" } }),
+      // Outdated: the line no longer exists on the new side.
+      commentEvent(LONG, { line: null }),
     ];
     for (const [index, event] of cases.entries()) {
       const res = await sendGithub("pull_request_review_comment", { ...event, comment: { ...event.comment, id: 800 + index } });
@@ -336,6 +338,29 @@ describe("capturing review comments", () => {
     level = 20;
     await sendGitlab(repo.id, note(2, LONG));
     expect(await prisma.reviewComment.count()).toBe(1);
+  });
+
+  it("skips a GitLab note on a removed line, before asking who the author is", async () => {
+    const repo = await gitlabRepo();
+    await enable();
+    const stub = fetchStub([{ url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } }]);
+    vi.stubGlobal("fetch", stub.fetch);
+
+    await sendGitlab(repo.id, {
+      object_kind: "note",
+      user: { id: 5, username: "alice" },
+      object_attributes: {
+        id: 1,
+        noteable_type: "MergeRequest",
+        type: "DiffNote",
+        discussion_id: "disc9",
+        note: LONG,
+        position: { old_path: "lib/db.rb", new_path: "lib/db.rb", old_line: 4, new_line: null },
+      },
+      merge_request: { iid: 7, last_commit: { id: "glsha" } },
+    });
+    expect(await prisma.reviewComment.count()).toBe(0);
+    expect(stub.calls.filter((call) => call.url.includes("/members/"))).toEqual([]);
   });
 
   it("fails the delivery when a GitLab diff note cannot be recorded, so it can be redelivered", async () => {

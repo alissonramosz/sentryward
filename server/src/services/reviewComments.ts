@@ -90,7 +90,10 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
   if (!workspace?.ruleSuggestionsEnabled) return "off";
 
   const text = body.trim();
-  if (!author || !input.file || input.isSelf || author.endsWith("[bot]")) return "skipped";
+  // Only a comment anchored to a current new-side line is about the change:
+  // an outdated or removed-line one (no line) teaches nothing a rule could hold.
+  const line = input.line;
+  if (!author || !input.file || line == null || input.isSelf || author.endsWith("[bot]")) return "skipped";
   if (text.length < MIN_COMMENT_CHARS || REVIEW_COMMAND.test(text)) return "skipped";
   // Anything Sentryward posts carries a marker; a person quoting one is rare
   // enough to lose.
@@ -124,7 +127,7 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
           author,
           body: text.slice(0, MAX_COMMENT_BODY),
           file,
-          line: input.line ?? null,
+          line,
         },
       });
       return "stored";
