@@ -107,6 +107,60 @@ export function preselect(items: EvidenceItem[], minEvidence: number): EvidenceI
   return [...selected.values()];
 }
 
+// A suggestion an admin discarded, as the later runs compare drafts against it.
+export type DiscardedRule = Pick<Rule, "id" | "description" | "pattern">;
+
+// Words that say nothing about what a rule checks. "no", "not" and "never"
+// stay: they carry which way the rule points.
+const STOPWORDS = new Set(["a", "an", "the", "to", "in", "on", "of", "for", "and", "or", "is", "are", "be", "with", "any", "every", "all", "always", "must", "should"]);
+// The model names a rule afresh on every run, so a rejected rule can come back
+// under another id or a reworded description. Close enough either way counts
+// as the same rule: a false match costs one draft of a weekly run, a miss puts
+// a rule an admin already rejected back in front of them.
+const DESCRIPTION_SIMILARITY = 0.6;
+const MIN_ID_TERMS = 2;
+
+// Lowercased words, stopwords dropped, a plural "s" cut ("calls" and "call").
+function ruleTerms(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((word) => word && !STOPWORDS.has(word))
+      .map((word) => (word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word)),
+  );
+}
+
+// The prompt asks for one imperative sentence first, then detail; the first
+// sentence is the rule, the rest varies between drafts of it.
+export function firstSentence(description: string): string {
+  return description.trim().split(/[.!?](?:\s|$)/)[0] ?? "";
+}
+
+function overlap(a: Set<string>, b: Set<string>): number {
+  let shared = 0;
+  for (const term of a) if (b.has(term)) shared++;
+  return shared;
+}
+
+// Whether a draft is a discarded rule again: the same pattern, an id whose
+// words all appear in the other's ("db-in-handlers", "no-db-calls-in-handlers"),
+// or a first sentence sharing most of its words.
+export function matchesDiscarded(rule: DiscardedRule, discarded: readonly DiscardedRule[]): boolean {
+  const id = ruleTerms(rule.id);
+  const description = ruleTerms(firstSentence(rule.description));
+  const pattern = rule.pattern?.trim();
+  return discarded.some((other) => {
+    if (pattern && other.pattern?.trim() === pattern) return true;
+    const otherId = ruleTerms(other.id);
+    if (Math.min(id.size, otherId.size) >= MIN_ID_TERMS && overlap(id, otherId) === Math.min(id.size, otherId.size)) return true;
+    const otherDescription = ruleTerms(firstSentence(other.description));
+    const shared = overlap(description, otherDescription);
+    const union = description.size + otherDescription.size - shared;
+    return union > 0 && shared / union >= DESCRIPTION_SIMILARITY;
+  });
+}
+
 export interface DraftSuggestion {
   rule: unknown;
   rationale: string;
@@ -124,7 +178,13 @@ export interface ValidSuggestion {
 
 // "evidence_removed" is set by the worker (worker/ruleSuggestions.ts), not
 // here: a cited comment deleted while the model was answering.
-export type SuggestionDropReason = "invalid_rule" | "id_taken" | "unknown_evidence" | "too_little_evidence" | "evidence_removed";
+export type SuggestionDropReason =
+  | "invalid_rule"
+  | "id_taken"
+  | "matches_discarded"
+  | "unknown_evidence"
+  | "too_little_evidence"
+  | "evidence_removed";
 
 export interface ValidationOutcome {
   suggestions: ValidSuggestion[];
@@ -133,11 +193,17 @@ export interface ValidationOutcome {
 
 // Keeps the drafts an admin could approve as they are: a valid rule (pattern
 // included, compiled with RE2 by the schema), an id no rule or pending
-// suggestion has, and enough real evidence. A draft citing a ref that was not
-// sent is dropped whole rather than trimmed: it is evidence the model made up.
+// suggestion has, no likeness to a discarded rule, and enough real evidence.
+// A draft citing a ref that was not sent is dropped whole rather than
+// trimmed: it is evidence the model made up.
 export function validateSuggestions(
   drafts: DraftSuggestion[],
-  { evidence, takenIds, minEvidence }: { evidence: EvidenceItem[]; takenIds: ReadonlySet<string>; minEvidence: number },
+  {
+    evidence,
+    takenIds,
+    discarded,
+    minEvidence,
+  }: { evidence: EvidenceItem[]; takenIds: ReadonlySet<string>; discarded: readonly DiscardedRule[]; minEvidence: number },
 ): ValidationOutcome {
   const byRef = new Map(evidence.map((item) => [item.ref, item]));
   const taken = new Set(takenIds);
@@ -158,6 +224,10 @@ export function validateSuggestions(
     const rule = parsed.data;
     if (taken.has(rule.id)) {
       drop("id_taken");
+      continue;
+    }
+    if (matchesDiscarded(rule, discarded)) {
+      drop("matches_discarded");
       continue;
     }
     const refs = [...new Set(draft.evidenceRefs.map((ref) => ref.trim()))];

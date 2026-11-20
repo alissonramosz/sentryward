@@ -545,13 +545,39 @@ describe("learning engine", () => {
         { rule: rule("reused"), rationale: "", evidenceRefs: ["c1", "c2", "c4"] },
         { rule: rule("spread"), rationale: "", evidenceRefs: ["c3", "c4"] },
       ],
-      { evidence, takenIds: new Set(["taken"]), minEvidence: 2 },
+      { evidence, takenIds: new Set(["taken"]), discarded: [], minEvidence: 2 },
     );
     expect(suggestions.map((s) => [s.rule.id, s.repositoryId])).toEqual([
       ["db-in-repos", "r1"],
       ["spread", null],
     ]);
     expect(dropped).toEqual({ invalid_rule: 2, id_taken: 1, unknown_evidence: 1, too_little_evidence: 2 });
+  });
+
+  it("drops a discarded rule drafted again under a new id", () => {
+    const evidence = [item("c1"), item("c2")];
+    const discarded = [
+      { id: "db-in-handlers", description: "Keep database calls out of route handlers. Use the repository layer." },
+      { id: "money-as-cents", description: "Store money amounts as integer cents.", pattern: "parseFloat\\(" },
+    ];
+    const draft = (id: string, description: string, extra = {}) => ({
+      rule: { id, description, severity: "minor", ...extra },
+      rationale: "",
+      evidenceRefs: ["c1", "c2"],
+    });
+    const run = (d: ReturnType<typeof draft>) => validateSuggestions([d], { evidence, takenIds: new Set(), discarded, minEvidence: 2 });
+
+    // The discarded id's words all in the new one.
+    expect(run(draft("no-db-calls-in-handlers", "Handlers go through services.")).dropped).toEqual({ matches_discarded: 1 });
+    // The same first sentence, reworded detail.
+    expect(run(draft("handler-db", "Keep the database calls out of route handlers. Services own them.")).dropped).toEqual({
+      matches_discarded: 1,
+    });
+    // The same pattern.
+    expect(run(draft("float-money", "Avoid floats for prices.", { pattern: "parseFloat\\(" })).dropped).toEqual({ matches_discarded: 1 });
+    // Sharing a word or two is not the same rule.
+    expect(run(draft("no-raw-sql-in-handlers", "Build queries with the query builder, not raw SQL strings.")).suggestions).toHaveLength(1);
+    expect(run(draft("log-request-ids", "Log the request id with every error in route handlers.")).suggestions).toHaveLength(1);
   });
 
   it("keeps ids and excerpts of the evidence", () => {
@@ -657,30 +683,43 @@ describe("worker run", () => {
     expect(await prisma.llmRequestLog.findFirst({ where: { workspaceId } })).toMatchObject({ purpose: "rule_suggest", outcome: "ok" });
   });
 
-  it("never brings back a discarded rule, even one the prompt no longer lists", async () => {
+  it("never brings back a discarded rule, even one the prompt no longer lists, under any id", async () => {
     const repo = await githubRepo();
     await enable({ ruleSuggestionsMinEvidence: 3 });
     await history(repo.id, 5);
-    const discarded = (id: string, daysAgo: number) => ({
+    const discarded = (id: string, daysAgo: number, description = `Unrelated rule number ${id}.`) => ({
       workspaceId,
       status: "discarded" as const,
-      rule: { id, description: "d", severity: "minor" },
+      rule: { id, description, severity: "minor" },
       rationale: "",
       evidence: { findingIds: [], commentIds: [], changes: 2, excerpts: [] },
       model: "m",
       decidedAt: new Date(Date.now() - daysAgo * 86_400_000),
     });
-    // The oldest of 21, past the 20 the prompt shows.
+    // The oldest of 101, past the 100 the prompt shows.
     await prisma.ruleSuggestion.createMany({
-      data: [discarded("db-in-repos", 30), ...Array.from({ length: 20 }, (_, i) => discarded(`other-${i}`, i))],
+      data: [
+        discarded("db-in-repos", 300, "Keep database calls in the repository layer."),
+        ...Array.from({ length: 100 }, (_, i) => discarded(`other-${i}`, i)),
+      ],
     });
-    const { runDeps } = deps((request: { prompt: string }) => {
-      expect(request.prompt).not.toContain("db-in-repos");
-      return draft(["c1", "c2", "c3"]);
-    });
+    const prompts: string[] = [];
+    const answer = (id: string) => (request: { prompt: string }) => {
+      prompts.push(request.prompt);
+      const { suggestions } = draft(["c1", "c2", "c3"]);
+      return { suggestions: [{ ...suggestions[0]!, id }] };
+    };
 
-    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ created: 0 });
-    expect(await prisma.ruleSuggestion.count({ where: { status: "pending" } })).toBe(0);
+    // Its own id, then a new one for the same rule.
+    for (const id of ["db-in-repos", "repository-layer-db-access"]) {
+      const { runDeps } = deps(answer(id));
+      expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+      expect(await prisma.ruleSuggestion.count({ where: { status: "pending" } })).toBe(0);
+      await prisma.workspace.update({ where: { id: workspaceId }, data: { ruleSuggestionsLastRunAt: null } });
+    }
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain("db-in-repos");
+    expect(prompts[0]).toContain("other-0: Unrelated rule number other-0");
   });
 
   it("skips the call when the privacy policy refuses the model", async () => {

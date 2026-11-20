@@ -46,8 +46,12 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   something recurs across at least two changes and the
   minimum evidence, asks the workspace's review model for at most five rules
   (audited as `rule_suggest`, privacy restrictions applied). Drafts with an
-  invalid rule, a taken id (including any discarded suggestion's) or too
-  little evidence are dropped, and each
+  invalid rule, a taken id (including any discarded suggestion's), a likeness
+  to any discarded suggestion under a new id (the same pattern, an id whose
+  words all appear in the other's, or a near-identical first sentence) or too
+  little evidence are dropped. The prompt lists the 100 most recently
+  discarded rules by their first sentence; the likeness check covers every
+  one. Each
   comment or dismissal backs one suggestion at most. Suggestions wait for an
   admin, who can edit one and approve it into the global settings or a
   repository's own settings through the same checks as a manual save, or

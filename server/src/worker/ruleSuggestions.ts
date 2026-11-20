@@ -20,7 +20,9 @@ import { ruleHistoryCutoff } from "./retention.ts";
 export const SUGGEST_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 // Rows read per source before preselection; the most recent win.
 const MAX_ROWS_PER_SOURCE = 2000;
-const MAX_DISCARDED_SHOWN = 20;
+// Most recent first. The prompt caps the section's size too; older ones are
+// still caught by validateSuggestions comparing drafts against every one.
+const MAX_DISCARDED_SHOWN = 100;
 // Dismissals that say something about the code. "Fix later" agrees with the
 // finding, and an unspecified reason says nothing.
 const LEARNED_REASONS: IgnoreReason[] = ["false_positive", "intentional"];
@@ -176,7 +178,7 @@ async function loadEvidence(workspaceId: string, excluded: string[], since: Date
   ];
 }
 
-type KnownRule = Pick<Rule, "id" | "description">;
+type KnownRule = Pick<Rule, "id" | "description" | "pattern">;
 
 // Rules saved in any dashboard layer of the workspace. Read leniently: a saved
 // value that no longer parses still names ids a new rule must not reuse.
@@ -184,7 +186,15 @@ function rulesIn(settings: unknown): KnownRule[] {
   const rules = (settings as { rules?: unknown } | null)?.rules;
   if (!Array.isArray(rules)) return [];
   return rules.flatMap((rule) =>
-    rule && typeof rule.id === "string" ? [{ id: rule.id, description: String(rule.description ?? "") }] : [],
+    rule && typeof rule.id === "string"
+      ? [
+          {
+            id: rule.id,
+            description: String(rule.description ?? ""),
+            ...(typeof rule.pattern === "string" ? { pattern: rule.pattern } : {}),
+          },
+        ]
+      : [],
   );
 }
 
@@ -194,7 +204,8 @@ async function knownRules(db: Prisma.TransactionClient, workspaceId: string, glo
     db.repository.findMany({ where: { connection: { workspaceId } }, select: { settings: true, directories: true } }),
     db.ruleSuggestion.findMany({ where: { workspaceId, status: "pending" }, select: { rule: true } }),
     // Every discarded rule, not only those the prompt shows: the model may
-    // ignore the prompt, and a discarded id must never come back.
+    // ignore the prompt, and a discarded rule must never come back, under its
+    // own id or (checked by validateSuggestions) a new one.
     db.ruleSuggestion.findMany({
       where: { workspaceId, status: "discarded" },
       select: { rule: true },
@@ -222,6 +233,7 @@ async function knownRules(db: Prisma.TransactionClient, workspaceId: string, glo
   return {
     existingRules: [...existing.values(), ...pendingRules],
     discarded: discardedRules.slice(0, MAX_DISCARDED_SHOWN),
+    allDiscarded: discardedRules,
     takenIds,
   };
 }
@@ -306,6 +318,7 @@ export async function suggestForWorkspace(workspaceId: string, token: string, no
     const { suggestions, dropped } = validateSuggestions(drafts, {
       evidence,
       takenIds: fresh.takenIds,
+      discarded: fresh.allDiscarded,
       minEvidence: current.min_evidence,
     });
     // Every cited comment and dismissal may have gone during the model call:

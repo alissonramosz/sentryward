@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Config, Rule } from "../config/schema.ts";
 import { CATEGORIES, SEVERITIES } from "../core/severity.ts";
-import { MAX_EXCERPT_CHARS, type DraftSuggestion, type EvidenceItem } from "../learn/suggest.ts";
+import { firstSentence, MAX_EXCERPT_CHARS, type DraftSuggestion, type EvidenceItem } from "../learn/suggest.ts";
 import { untrusted } from "./prompt.ts";
 import { generateWithFallback, modelChain, type Generate, type GenerateResponse } from "./providers.ts";
 
@@ -46,9 +46,13 @@ function evidenceLine(item: EvidenceItem): string {
   return `[${item.ref}] dismissed finding on ${where} (${item.category}, ${item.reason}): ${item.title ?? ""}${note}`;
 }
 
-function ruleList(rules: Pick<Rule, "id" | "description">[]): string {
-  return rules.map((rule) => `- ${rule.id}: ${rule.description.replace(/\s+/g, " ").slice(0, 200)}`).join("\n");
+function ruleList(rules: Pick<Rule, "id" | "description">[], descriptionChars = 200): string {
+  return rules.map((rule) => `- ${rule.id}: ${rule.description.replace(/\s+/g, " ").slice(0, descriptionChars)}`).join("\n");
 }
+
+// Discarded rules are listed shorter, so more of them fit the section: the
+// first sentence names the rule well enough to steer the model away from it.
+const DISCARDED_DESCRIPTION_CHARS = 120;
 
 export function ruleSuggestUserPrompt(input: RuleSuggestInput): string {
   const sections = [
@@ -60,7 +64,10 @@ export function ruleSuggestUserPrompt(input: RuleSuggestInput): string {
     sections.push(`Existing rules (do not repeat or overlap):\n${untrusted(ruleList(input.existingRules), MAX_KNOWN_RULES_CHARS)}`);
   }
   if (input.discarded.length) {
-    sections.push(`Rules the team already rejected (do not propose again):\n${untrusted(ruleList(input.discarded), MAX_KNOWN_RULES_CHARS)}`);
+    const discarded = input.discarded.map((rule) => ({ id: rule.id, description: firstSentence(rule.description) }));
+    sections.push(
+      `Rules the team already rejected (do not propose again):\n${untrusted(ruleList(discarded, DISCARDED_DESCRIPTION_CHARS), MAX_KNOWN_RULES_CHARS)}`,
+    );
   }
   return sections.join("\n\n");
 }
