@@ -477,7 +477,15 @@ describe("Configuration page", { timeout: 20_000 }, () => {
   })
 
   it("refuses to save deep review without a specialist", async () => {
-    mockApi(globalRoutes())
+    let saved = false
+    mockApi(
+      globalRoutes({
+        "PUT /api/config/global": (init?: RequestInit) => {
+          saved = true
+          return jsonResponse(200, globalConfig(JSON.parse(String(init?.body)).settings))
+        },
+      }),
+    )
     renderWithProviders(<App />, { route: "/configuration" })
 
     await openTab("Finding Types")
@@ -485,6 +493,10 @@ describe("Configuration page", { timeout: 20_000 }, () => {
     await userEvent.click(screen.getByRole("checkbox", { name: "tests" }))
 
     expect(await screen.findByText("Choose at least one specialist")).toBeInTheDocument()
+    const save = screen.getByRole("button", { name: "Save global config" })
+    expect(save).toBeDisabled()
+    await userEvent.click(save)
+    expect(saved).toBe(false)
   })
 
   it("edits the trigger settings in the global config", async () => {

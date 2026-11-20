@@ -13,17 +13,18 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - Deep review (`review.deep`). Off by default; when on, every review pass of a
   change is reviewed again by up to seven specialists (`naming`,
   `invariants`, `boundaries`, `contracts`, `tests`, `leaks`, `consistency`),
-  each told to look for one kind of defect only, at one more model call per
-  pass each. Settable at every config layer (`review.deep.enabled`,
+  each told to look for one kind of defect only, each adding one review pass
+  per planned chunk (more than one model call with agentic context). Settable at every config layer (`review.deep.enabled`,
   `review.deep.specialists`), on the Finding Types tab, or for one run with
   `/sentryward review deep` or the **Deep review** switch in the manual review
   sheet (stored on the job as `review_jobs.deep`, kept by re-runs). Specialist
   findings are tagged with the specialist (`reviewer`) and their calls with
   `lens` in usage; they skip the category filter like rule findings, never
   carry team rules (those stay with the general pass), and a failed
-  specialist pass is a warning rather than a partial review. Specialist
-  findings on files whose general pass failed are dropped with those files,
-  and a warning says how many. In agentic mode specialists leave half of
+  specialist pass is a warning rather than a partial review. Findings from a
+  specialist pass whose general pass on the same part of the change failed
+  are dropped, and a warning says how many; a file split across passes keeps
+  what was found in the parts whose general pass succeeded. In agentic mode specialists leave half of
   `review.agent.maxSearches` to the general passes. `/sentryward review
   deep-dive ...` is not read as a deep review request. A specialist's
   rewording of a general finding (same file, category and overlapping lines,

@@ -305,8 +305,23 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   // A specialist's calls are tagged so their cost can be told apart.
   const tagLens = (lens: Lens, entries: LlmUsage[]): LlmUsage[] =>
     lens.kind === "specialist" ? entries.map((entry) => ({ ...entry, lens: lens.id })) : entries;
+  // The general pass alone decides coverage, so what a specialist found in a
+  // pass whose general pass failed is dropped with it. This is per pass, not
+  // per file: a file split across passes keeps what was found where its
+  // general pass succeeded, as its general findings are. The specialist's
+  // calls were still paid for, so the loss is said rather than silent.
+  const failedGeneral = new Set(
+    outcomes.filter((outcome) => !outcome.review && outcome.lens.kind === "general").map((outcome) => outcome.chunk.index),
+  );
+  let orphaned = 0;
   for (const outcome of outcomes) {
     const specialist = outcome.lens.kind === "specialist";
+    if (outcome.review && specialist && failedGeneral.has(outcome.chunk.index)) {
+      orphaned += outcome.review.findings.length;
+      usage.push(...tagLens(outcome.lens, [...outcome.review.failedUsage, outcome.review.usage]));
+      warnings.push(...outcome.review.warnings);
+      continue;
+    }
     if (outcome.review) {
       const { model } = outcome.review.usage;
       // A specialist was not given the team rules, so a rule it names is not
@@ -355,17 +370,6 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   const general = outcomes.filter((outcome) => outcome.review && outcome.lens.kind === "general");
   const succeeded = general.flatMap((outcome) => outcome.chunk.parts);
   const reviewedFiles = [...new Set(succeeded.map((part) => part.file.path))].filter((path) => !incomplete.has(path));
-  // The general pass alone decides coverage, so what a specialist found on a
-  // file whose general pass failed is dropped with that file. Its calls were
-  // still paid for, so the loss is said rather than silent.
-  const covered = new Set(succeeded.map((part) => part.file.path));
-  const uncovered = new Set(
-    outcomes
-      .filter((outcome) => !outcome.review && outcome.lens.kind === "general")
-      .flatMap((outcome) => outcome.chunk.parts.map((part) => part.file.path))
-      .filter((path) => !covered.has(path)),
-  );
-  const orphaned = raw.filter((finding) => finding.reviewer && uncovered.has(finding.file)).length;
   if (orphaned > 0) {
     warnings.push(`${orphaned} deep review finding${orphaned === 1 ? " was" : "s were"} dropped with files whose review pass failed`);
   }

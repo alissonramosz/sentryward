@@ -130,7 +130,8 @@ describe("runReview with deep review", () => {
     );
 
     expect(requests.map(specialistOf)).toEqual([undefined, "naming", "tests"]);
-    expect(progress.every((total) => total === 3)).toBe(true);
+    // The first report comes before any pass finishes, then one per pass.
+    expect(progress).toEqual([3, 3, 3, 3]);
     expect(result.status).toBe("completed");
     expect(result.coverage.passes).toBe(1);
     expect(result.findings.map((f) => [f.title, f.reviewer, f.category, f.source])).toEqual([
@@ -174,6 +175,36 @@ describe("runReview with deep review", () => {
     // The specialist's findings need a file the general pass reviewed, and
     // their loss is said, since the specialist's call was paid for.
     expect(result.findings).toEqual([]);
+    expect(result.warnings).toContain("1 deep review finding was dropped with files whose review pass failed");
+  });
+
+  it("drops only what a specialist found in the part of a split file whose general pass failed", async () => {
+    // Each hunk nearly fills the 2,000-token minimum pass, so the file is
+    // split across two passes.
+    const patch = [
+      `@@ -1,2 +1,3 @@\n a\n+${"x".repeat(7000)}\n b`,
+      `@@ -100,2 +100,3 @@\n a\n+${"y".repeat(7000)}\n b`,
+    ].join("\n");
+    const changeSet = makeChangeSet([{ path: "src/big.ts", changeType: "modified", patch }]);
+    const { generate } = fakeModel({
+      code_review: (request: GenerateRequest<unknown>) => {
+        const second = request.prompt.includes("yyyy");
+        if (!specialistOf(request)) return second ? new Error("down") : { findings: [] };
+        const line = second ? 101 : 2;
+        return {
+          findings: [modelFinding({ file: "src/big.ts", startLine: line, endLine: line, title: `Problem on line ${line}` })],
+        };
+      },
+    });
+
+    const result = await runReview(
+      { changeSet, config: deep(["boundaries"], { llm: { contextBudget: 4000 }, review: { requireEvidence: false } }) },
+      { generate },
+    );
+
+    expect(result.coverage.passes).toBe(2);
+    expect(result.errors).toEqual(["Review pass 2 failed: down"]);
+    expect(result.findings.map((f) => [f.title, f.reviewer])).toEqual([["Problem on line 2", "boundaries"]]);
     expect(result.warnings).toContain("1 deep review finding was dropped with files whose review pass failed");
   });
 

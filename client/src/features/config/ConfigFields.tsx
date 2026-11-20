@@ -2262,7 +2262,7 @@ export function ConfigFields(props: {
         <FieldSeparator />
         <Section
           title="Deep review"
-          description="Specialist passes on top of the general one. Each selected specialist costs one model call per review pass."
+          description="Specialist passes on top of the general one. Each selected specialist adds one review pass per planned chunk, which may make multiple model calls with Agentic context."
         >
           {choiceField("deepReview")}
           <CategoriesField
