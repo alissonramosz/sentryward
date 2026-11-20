@@ -37,6 +37,10 @@ export interface ReviewCommentInput {
   // an outsider's comments cannot steer what a team enforces. Asked last, as it
   // may cost a forge call.
   allowed: () => Promise<boolean>;
+  // Whether the author is a bot, for forges whose webhook does not say (a
+  // GitHub bot is recognised by its login). Asked only once the author is
+  // allowed, as it may cost a forge call too.
+  isBot?: () => Promise<boolean>;
 }
 
 export type ReviewCommentOutcome = "stored" | "off" | "skipped" | "not_allowed" | "duplicate" | "failed" | "error";
@@ -102,6 +106,7 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
   if (excluded.has(author.toLowerCase())) return "skipped";
   if (input.threadId && (await postedThread(input))) return "skipped";
   if (!(await input.allowed())) return "not_allowed";
+  if (input.isBot && (await input.isBot())) return "skipped";
   if (input.threadId && (await markedThread(input))) return "skipped";
 
   const file = withoutNul(input.file);

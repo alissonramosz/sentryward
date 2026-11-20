@@ -16,7 +16,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   (on GitHub, checked against the commenter's repository role, so a
   read-only or triage collaborator's comments are not kept)
   (`review_comments`) from the GitHub and GitLab webhooks already received,
-  skipping bots, commands, Sentryward's own threads (recognised by the thread
+  skipping bots (on GitLab, whose webhook does not mark them, access token
+  users and service accounts are recognised by the users API's bot flag,
+  asked only for a comment that would otherwise be kept), commands,
+  Sentryward's own threads (recognised by the thread
   root's marker when the posted-comment record no longer names it),
   excluded reviewers and comments not anchored to a current new-side line
   (outdated comments, GitLab notes on removed lines), which are skipped before

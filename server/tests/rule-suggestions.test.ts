@@ -317,6 +317,7 @@ describe("capturing review comments", () => {
             return { access_level: level };
           },
         },
+        { url: /\/users\/5$/, body: { bot: false } },
       ]).fetch,
     );
     const note = (id: number, text: string) => ({
@@ -338,6 +339,34 @@ describe("capturing review comments", () => {
     level = 20;
     await sendGitlab(repo.id, note(2, LONG));
     expect(await prisma.reviewComment.count()).toBe(1);
+  });
+
+  it("skips a GitLab diff note from a bot, which the webhook does not mark", async () => {
+    const repo = await gitlabRepo();
+    await enable();
+    // A project access token with Developer access: allowed, but not a person.
+    const stub = fetchStub([
+      { url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } },
+      { url: /\/users\/5$/, body: { bot: true } },
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+
+    const response = await sendGitlab(repo.id, {
+      object_kind: "note",
+      user: { id: 5, username: "project_77_bot_0123456789abcdef" },
+      object_attributes: {
+        id: 1,
+        noteable_type: "MergeRequest",
+        type: "DiffNote",
+        discussion_id: "disc9",
+        note: LONG,
+        position: { new_path: "lib/db.rb", new_line: 4 },
+      },
+      merge_request: { iid: 7, last_commit: { id: "glsha" } },
+    });
+    expect(response.status).toBe(202);
+    expect(await prisma.reviewComment.count()).toBe(0);
+    expect(stub.calls.filter((call) => call.url.endsWith("/users/5"))).toHaveLength(1);
   });
 
   it("skips a GitLab note on a removed line, before asking who the author is", async () => {
@@ -387,7 +416,10 @@ describe("capturing review comments", () => {
     expect(failed.body.outcome).toBe("failed");
     expect(await prisma.reviewComment.count()).toBe(0);
 
-    vi.stubGlobal("fetch", fetchStub([{ url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } }]).fetch);
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([{ url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } }, { url: /\/users\/5$/, body: { bot: false } }]).fetch,
+    );
     expect((await sendGitlab(repo.id, note)).body.outcome).toBe("ignored");
     expect(await prisma.reviewComment.findMany()).toMatchObject([{ number: 7, forgeCommentId: "1" }]);
   });
@@ -399,6 +431,7 @@ describe("capturing review comments", () => {
       "fetch",
       fetchStub([
         { url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 }, times: 1 },
+        { url: /\/users\/5$/, body: { bot: false } },
         // Then the connection may no longer read members: every redelivery would fail the same way.
         { url: /\/projects\/77\/members\/all\/5$/, status: 403, body: { message: "403 Forbidden" } },
       ]).fetch,
@@ -432,6 +465,7 @@ describe("capturing review comments", () => {
     await trackFinding(repo.id, 7);
     const stub = fetchStub([
       { url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } },
+      { url: /\/users\/5$/, body: { bot: false } },
       { url: /\/merge_requests\/7\/discussions\/disc9$/, body: { id: "disc9", notes: [{ id: 1, body: "Why here?", author: { username: "bob" } }] } },
     ]);
     vi.stubGlobal("fetch", stub.fetch);
@@ -452,6 +486,7 @@ describe("capturing review comments", () => {
 
     expect(await prisma.reviewComment.count()).toBe(1);
     expect(stub.calls.filter((call) => call.url.includes("/members/all/5"))).toHaveLength(1);
+    expect(stub.calls.filter((call) => call.url.endsWith("/users/5"))).toHaveLength(1);
     expect(stub.calls.filter((call) => call.url.includes("/discussions/disc9"))).toHaveLength(1);
   });
 });

@@ -142,7 +142,9 @@ export const gitlabProvider: ProviderDefinition = {
 
       // A note on a diff thread. The thread's own first note arrives here too;
       // recordThreadReply drops it by its marker. Both connection kinds post as
-      // the connected person, so the login cannot tell the bot apart.
+      // the connected person, so the login cannot tell the bot apart. Other
+      // bots (access tokens, service accounts) are not marked in the payload
+      // either; rule evidence asks the users API, once it would be kept.
       if (
         event === "Note Hook" &&
         attrs.noteable_type === "MergeRequest" &&
@@ -175,6 +177,7 @@ export const gitlabProvider: ProviderDefinition = {
           line: attrs.position?.new_line,
           isSelf: false,
           allowed,
+          isBot: once(() => forge.userIsBot(user.id)),
         });
         const reply = await recordThreadReply({
           repo,
