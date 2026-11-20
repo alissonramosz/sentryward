@@ -316,8 +316,11 @@ export async function suggestForWorkspace(workspaceId: string, token: string, no
     // and only those retention would keep: evidence was loaded within the
     // cutoff, but an item can age past it during the model call and be deleted
     // the moment the lock is released, leaving an excerpt behind. A suggestion
-    // missing any of its evidence is dropped whole.
-    const cutoff = ruleHistoryCutoff(policy.retentionDays, new Date());
+    // missing any of its evidence is dropped whole. The policy is read again
+    // for the cutoff: a retention period shortened during the call must apply
+    // now, since saving it prunes nothing until the next retention sweep.
+    const latestPolicy = await deps.policyFor(workspaceId);
+    const cutoff = ruleHistoryCutoff(latestPolicy.retentionDays, new Date());
     const commentIds = suggestions.flatMap((s) => s.evidence.filter((item) => item.kind === "comment").map((item) => item.id));
     const findingIds = suggestions.flatMap((s) => s.evidence.filter((item) => item.kind === "dismissal").map((item) => item.id));
     const lockedComments = commentIds.length

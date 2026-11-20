@@ -71,7 +71,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   before it checks again. Before saving, a run also locks every comment and dismissal it
   cites, so retention cannot delete one until the suggestion is stored, and
   drops any suggestion whose evidence is gone, no longer dismissed, or already
-  past the workspace's retention cutoff, so no excerpt outlives what it quotes.
+  past the retention cutoff in force at save time (a period shortened during
+  the model call applies too), so no excerpt outlives what it quotes.
   Drafts are validated under that same lock, against the evidence minimum and
   the rule ids taken at that moment, so a minimum raised or a rule approved
   under the drafted id while the model is answering drops the draft.

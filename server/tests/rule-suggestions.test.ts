@@ -911,6 +911,24 @@ describe("worker run", () => {
     expect(await prisma.ruleSuggestion.count()).toBe(0);
   });
 
+  it("drops a suggestion citing evidence outside a retention period shortened during the model call", async () => {
+    const repo = await githubRepo();
+    await enable({ ruleSuggestionsMinEvidence: 3 });
+    await history(repo.id, 5);
+    // Inside the 90-day history window, so loaded while retention is unset.
+    await prisma.reviewComment.updateMany({ data: { createdAt: daysAgo(40) } });
+
+    let retentionDays: number | null = null;
+    const policyFor = async () =>
+      mergePolicy({ ...OPEN_LAYER, auditRetentionDays: null, retentionSource: null }, { ...OPEN_LAYER, retentionDays });
+    const shorten = async () => {
+      retentionDays = 30;
+    };
+    const runDeps = deletingMidCall(["c1", "c2", "c3"], shorten, { policyFor });
+    expect(await runNextRuleSuggestions(new Date(), runDeps)).toMatchObject({ outcome: "suggested", created: 0, dropped: 1 });
+    expect(await prisma.ruleSuggestion.count()).toBe(0);
+  });
+
   it("drops a suggestion short of an evidence minimum raised during the model call", async () => {
     const repo = await githubRepo();
     await enable({ ruleSuggestionsMinEvidence: 3 });
