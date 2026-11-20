@@ -818,6 +818,68 @@ describe("GET and PUT /api/config/global", () => {
     }
   });
 
+  it("checks the saved repository rules when a repository stops following the global settings", async () => {
+    const rule = { id: "no-raw-sql", description: "Rule.", severity: "minor" };
+    const repo = await prisma.repository.create({
+      data: {
+        connectionId,
+        provider: "gitlab",
+        host: "gitlab.com",
+        fullPath: "team/switch",
+        externalId: "12",
+        defaultBranch: "main",
+        followGlobal: true,
+        settings: { rules: [rule] },
+      },
+    });
+    const { workspaceId } = await prisma.forgeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+    await prisma.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: { rules: [rule] } } });
+
+    const res = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ followGlobal: false });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.rules).toEqual([
+      "Rule no-raw-sql in the repository settings was ignored: a rule with that id is already set in the global config",
+    ]);
+    expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).followGlobal).toBe(true);
+
+    // Following the global settings again never needs the check.
+    const back = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ followGlobal: true });
+    expect(back.status).toBe(200);
+  });
+
+  it("checks a follow-global switch against the global settings as they are when it commits", async () => {
+    const rule = { id: "no-raw-sql", description: "Rule.", severity: "minor" };
+    const repo = await prisma.repository.create({
+      data: {
+        connectionId,
+        provider: "gitlab",
+        host: "gitlab.com",
+        fullPath: "team/switch-race",
+        externalId: "13",
+        defaultBranch: "main",
+        followGlobal: true,
+        settings: { rules: [rule] },
+      },
+    });
+    const { workspaceId } = await prisma.forgeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+    // A global rule with the same id lands after the request loaded the
+    // repository, just before its transaction starts.
+    const original = prisma.$transaction.bind(prisma);
+    const spy = vi.spyOn(prisma, "$transaction").mockImplementationOnce((async (...args: Parameters<typeof prisma.$transaction>) => {
+      await prisma.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: { rules: [rule] } } });
+      return original(...args);
+    }) as typeof prisma.$transaction);
+    try {
+      const res = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ followGlobal: false });
+      expect(res.status).toBe(400);
+      expect(res.body.errors.rules).toEqual([
+        "Rule no-raw-sql in the repository settings was ignored: a rule with that id is already set in the global config",
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("requires a saved connection for global configuration", async () => {
     const missing = await request(app)
       .put("/api/config/global")

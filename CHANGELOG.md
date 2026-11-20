@@ -604,6 +604,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   global settings read under a lock on the workspace, the one approvals and
   global saves take, so a global rule added at the same moment can no longer
   slip past the check and silently replace a repository or folder rule.
+- Switching a repository from the global settings to its own now takes that
+  same workspace lock and checks its saved rules against the global settings,
+  as saving them would. A global rule approved at the same moment could
+  previously see the repository as still following the global settings and
+  silently replace one of its rules.
 - The Recent reviews lists on the Home and Usage pages label an untitled
   GitLab merge request as `Merge request !42` and an untitled GitHub pull
   request as `Pull request #42`, instead of `#42`, and the Usage list writes a

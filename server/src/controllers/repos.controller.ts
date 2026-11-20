@@ -218,19 +218,28 @@ export async function updateRepo(req: Request, res: Response) {
   // The cancel commits with the update, so a repository is never left off with
   // jobs still in flight. A job claimed just before finds it off in runJob.
   const updated = await prisma.$transaction(async (tx) => {
-    if (settings !== undefined) {
-      // Under the same row lock as folder changes, so a folder saved meanwhile
-      // is checked against these settings too.
+    // Settings and follow-global changes both decide which rule layers are
+    // active, so both take the locks folder changes and global approvals take:
+    // an approval then sees the repository's final layers, not one about to
+    // switch to its own rules. Under the same row lock as folder changes, so a
+    // folder saved meanwhile is checked against these settings too.
+    if (settings !== undefined || followGlobal !== undefined) {
       const globalSettings = await lockForRules(tx, req.workspaceId!, id);
       const saved = await tx.repository.findUniqueOrThrow({
         where: { id },
         select: { settings: true, directories: true, followGlobal: true },
       });
-      // The schema requires a revision whenever settings are sent.
-      if (revision !== settingsRevision(saved.settings)) {
-        throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
+      if (settings !== undefined) {
+        // The schema requires a revision whenever settings are sent.
+        if (revision !== settingsRevision(saved.settings)) {
+          throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
+        }
+        requireRepoSettingsRules(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
+      } else if (followGlobal === false && saved.followGlobal) {
+        // Leaving the global settings activates the saved ones, read under the
+        // row lock, so they are checked as a save of them would be.
+        requireRepoSettingsRules(globalSettings, saved, saved.settings, false);
       }
-      requireRepoSettingsRules(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
     }
     const row = await tx.repository.update({
       where: { id },
@@ -246,9 +255,9 @@ export async function updateRepo(req: Request, res: Response) {
   res.json({ repo, ...(webhook ? { webhook } : {}) });
 }
 
-// Locks the repository for a settings or folder change and returns the global
-// settings to check its rules against, read under a share lock on the
-// workspace: a rule suggestion approval or global save (FOR NO KEY UPDATE)
+// Locks the repository for a settings, follow-global or folder change and
+// returns the global settings to check its rules against, read under a share
+// lock on the workspace: a rule suggestion approval or global save (FOR NO KEY UPDATE)
 // cannot then add a clashing global rule between the check and the commit.
 // The workspace first, then the repository, the order approvals take them in,
 // which would otherwise deadlock with this.
@@ -268,7 +277,7 @@ async function lockForRules(tx: Prisma.TransactionClient, workspaceId: string, i
 export function requireRepoSettingsRules(
   globalSettings: unknown,
   saved: { settings: unknown; directories: unknown },
-  settings: DashboardOverride,
+  settings: unknown,
   followGlobal: boolean,
 ) {
   const after = repoSettingsRuleIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal });
