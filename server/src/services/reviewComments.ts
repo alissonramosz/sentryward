@@ -1,4 +1,6 @@
+import { Prisma } from "../generated/prisma/client.ts";
 import { prisma } from "../lib/prisma.ts";
+import { ForgeError } from "../review/forge/http.ts";
 import { REVIEW_COMMAND } from "../lib/webhook.ts";
 import { markersIn, REPLY_MARKER } from "../review/core/markers.ts";
 import type { ThreadRoot } from "../review/forge/types.ts";
@@ -37,23 +39,49 @@ export interface ReviewCommentInput {
   allowed: () => Promise<boolean>;
 }
 
-export type ReviewCommentOutcome = "stored" | "off" | "skipped" | "not_allowed" | "duplicate" | "failed";
+export type ReviewCommentOutcome = "stored" | "off" | "skipped" | "not_allowed" | "duplicate" | "failed" | "error";
 
 // Stores a person's comment on a changed line, if its workspace learns rules.
 // Never throws: a delivery that also carries a thread reply must go on to it.
-// A failure is "failed", so a caller with nothing else to do can fail the
-// delivery and have it redelivered (a stored comment comes back "duplicate").
+// A failure a retry could fix is "failed", so the caller can fail the delivery
+// and have it redelivered (a stored comment comes back "duplicate"). One that
+// would fail the same way every time is "error" and only logged: failing those
+// deliveries would get the hook disabled (GitLab does after repeated failures),
+// stopping automatic reviews too, for a comment that can never be kept.
 export async function recordReviewComment(input: ReviewCommentInput): Promise<ReviewCommentOutcome> {
   try {
     return await record(input);
   } catch (err) {
     console.error("[webhook] could not store review comment %s on %s#%d", input.commentId, input.repo.fullPath, input.number, err);
-    return "failed";
+    return isPermanent(err) ? "error" : "failed";
   }
 }
 
+// Prisma codes for input the database will never accept.
+const PERMANENT_PRISMA_CODES = new Set(["P2000", "P2006", "P2007", "P2011", "P2012", "P2019", "P2020"]);
+
+// Errors a redelivery would hit again. Anything not known to be permanent
+// counts as transient, so evidence is only given up when it is certain.
+function isPermanent(err: unknown): boolean {
+  if (err instanceof ForgeError) return err.status >= 400 && err.status < 500 && err.status !== 429 && !err.rateLimited;
+  if (err instanceof Prisma.PrismaClientValidationError) return true;
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (PERMANENT_PRISMA_CODES.has(err.code)) return true;
+  // The driver adapter carries Postgres' SQLSTATE: class 22 is a data
+  // exception (a value the column cannot hold), 23 an integrity violation.
+  const sqlState = (err.meta as { driverAdapterError?: { cause?: { code?: unknown } } } | undefined)?.driverAdapterError?.cause?.code;
+  return typeof sqlState === "string" && /^2[23]/.test(sqlState);
+}
+
+// Postgres text cannot hold NUL, so a body or path carrying one would be
+// refused on every redelivery. It means nothing to a reader either.
+function withoutNul(text: string): string {
+  return text.replaceAll("\u0000", "");
+}
+
 async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> {
-  const { repo, number, author, body } = input;
+  const { repo, number, author } = input;
+  const body = withoutNul(input.body);
   const workspace = await prisma.workspace.findUnique({
     where: { id: repo.connection.workspaceId },
     select: { ruleSuggestionsEnabled: true, ruleSuggestionsExcludedReviewers: true },
@@ -73,7 +101,7 @@ async function record(input: ReviewCommentInput): Promise<ReviewCommentOutcome> 
   if (!(await input.allowed())) return "not_allowed";
   if (input.threadId && (await markedThread(input))) return "skipped";
 
-  const file = input.file;
+  const file = withoutNul(input.file);
   try {
     return await prisma.$transaction(async (tx): Promise<ReviewCommentOutcome> => {
       // The settings may have changed during the forge calls above. Read them

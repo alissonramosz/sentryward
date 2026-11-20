@@ -11,6 +11,7 @@ import { adapterForConnection, loadWorkspaceConnection, toHttpError } from "../s
 import { requireStoredLlmConnection } from "../services/llm.ts";
 import { ensureWebhook, removeWebhook } from "../services/webhooks.ts";
 import { cancelForDisabledRepositories, DISABLED_REASON } from "../worker/queue.ts";
+import { stripRepositoryEvidence } from "./ruleSuggestions.controller.ts";
 import {
   addDirectorySchema,
   availableReposQuerySchema,
@@ -220,7 +221,7 @@ export async function updateRepo(req: Request, res: Response) {
     if (settings !== undefined) {
       // Under the same row lock as folder changes, so a folder saved meanwhile
       // is checked against these settings too.
-      await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+      const globalSettings = await lockForRules(tx, req.workspaceId!, id);
       const saved = await tx.repository.findUniqueOrThrow({
         where: { id },
         select: { settings: true, directories: true, followGlobal: true },
@@ -229,7 +230,7 @@ export async function updateRepo(req: Request, res: Response) {
       if (revision !== settingsRevision(saved.settings)) {
         throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
       }
-      requireRepoSettingsRules(existing.connection.workspace.reviewSettings, saved, settings, followGlobal ?? saved.followGlobal);
+      requireRepoSettingsRules(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
     }
     const row = await tx.repository.update({
       where: { id },
@@ -243,6 +244,20 @@ export async function updateRepo(req: Request, res: Response) {
   if (enabled === false) await removeWebhook(updated, existing.connection);
   const repo = await loadPublicRepo(id);
   res.json({ repo, ...(webhook ? { webhook } : {}) });
+}
+
+// Locks the repository for a settings or folder change and returns the global
+// settings to check its rules against, read under a share lock on the
+// workspace: a rule suggestion approval or global save (FOR NO KEY UPDATE)
+// cannot then add a clashing global rule between the check and the commit.
+// The workspace first, then the repository, the order approvals take them in,
+// which would otherwise deadlock with this.
+async function lockForRules(tx: Prisma.TransactionClient, workspaceId: string, id: string): Promise<unknown> {
+  const [workspace] = await tx.$queryRaw<{ review_settings: unknown }[]>`
+    SELECT review_settings FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE
+  `;
+  await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+  return workspace?.review_settings;
 }
 
 // Repository rules the layers below would leave out are refused, and so are
@@ -288,9 +303,9 @@ async function changeDirectories(
   id: string,
   change: (dirs: DirectorySetting[]) => { dirs: DirectorySetting[]; checkRules?: string },
 ) {
-  const existing = await loadOwnedRepo(workspaceId, id);
+  await loadOwnedRepo(workspaceId, id);
   await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${id}::uuid FOR UPDATE`;
+    const globalSettings = await lockForRules(tx, workspaceId, id);
     const row = await tx.repository.findUniqueOrThrow({
       where: { id },
       select: { settings: true, directories: true, followGlobal: true },
@@ -307,7 +322,7 @@ async function changeDirectories(
     if (checkRules !== undefined) {
       const index = parsed.data.findIndex((dir) => dir.path === checkRules);
       const issues = repoSettingsRuleIssues({
-        globalSettings: existing.connection.workspace.reviewSettings,
+        globalSettings,
         repoSettings: row.settings,
         directories: parsed.data,
         followGlobal: row.followGlobal,
@@ -358,7 +373,8 @@ export async function removeDirectory(req: Request, res: Response) {
 // repository later starts without history. Notification filters drop it in the
 // same step, as do rule suggestions still pending for it: with no repository
 // they would read as suggestions for the global settings. Decided ones keep
-// their history without it.
+// their history without it. Other suggestions citing its comments or
+// dismissals lose those excerpts, so its people's words go with it.
 export async function deleteRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
   const repo = await loadOwnedRepo(req.workspaceId!, id);
@@ -367,6 +383,7 @@ export async function deleteRepo(req: Request, res: Response) {
   await prisma.$transaction(async (tx) => {
     await dropRepositoriesFromTargets(tx, [id]);
     await tx.ruleSuggestion.deleteMany({ where: { repositoryId: id, status: "pending" } });
+    await stripRepositoryEvidence(tx, { id, host: repo.host, fullPath: repo.fullPath });
     await tx.repository.delete({ where: { id } });
   });
   res.status(204).end();

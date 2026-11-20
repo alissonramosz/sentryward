@@ -791,6 +791,33 @@ describe("GET and PUT /api/config/global", () => {
     expect(grown.body.warnings).toEqual([expect.stringMatching(/^team\/limits: Rules in the repository settings were ignored/)]);
   });
 
+  it("checks repository rules against the global settings as they are when the save commits", async () => {
+    const rule = { id: "no-raw-sql", description: "Rule.", severity: "minor" };
+    const repo = await prisma.repository.create({
+      data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/race", externalId: "11", defaultBranch: "main", followGlobal: false },
+    });
+    const { workspaceId } = await prisma.forgeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+    // A global rule with the same id lands after the request loaded the
+    // repository, just before its transaction starts.
+    const original = prisma.$transaction.bind(prisma);
+    const spy = vi.spyOn(prisma, "$transaction").mockImplementationOnce((async (...args: Parameters<typeof prisma.$transaction>) => {
+      await prisma.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: { rules: [rule] } } });
+      return original(...args);
+    }) as typeof prisma.$transaction);
+    try {
+      const res = await request(app)
+        .patch(`/api/repos/${repo.id}`)
+        .set("Cookie", cookie)
+        .send({ settings: { rules: [rule] }, settingsRevision: await repoRevision(repo.id) });
+      expect(res.status).toBe(400);
+      expect(res.body.errors.rules).toEqual([
+        "Rule no-raw-sql in the repository settings was ignored: a rule with that id is already set in the global config",
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("requires a saved connection for global configuration", async () => {
     const missing = await request(app)
       .put("/api/config/global")

@@ -183,6 +183,12 @@ export function validateSuggestions(
   return { suggestions, dropped };
 }
 
+// How evidence names its repository, in prompts and stored excerpts; deleting
+// a repository finds its excerpts by this too.
+export function repoLabel(repo: { host: string; fullPath: string }): string {
+  return `${repo.host}/${repo.fullPath}`;
+}
+
 export interface StoredEvidence {
   findingIds: string[];
   commentIds: string[];

@@ -593,7 +593,7 @@ details in `.env`:
 | Commit statuses | read and write | The `sentryward/review` status | No commit status |
 | Issues | read | Linked and related issues in the walkthrough | Those parts are skipped with a warning |
 | Checks | read | [Static analysis findings](#static-analysis-findings) | They are skipped with a warning |
-| Metadata | read | Required by GitHub | |
+| Metadata | read | Required by GitHub; also a commenter's repository role, for `/sentryward review` and replies | |
 
 ### GitLab
 
@@ -802,7 +802,10 @@ age and repository.
   still waiting in the queue.
 - Comment `/sentryward review` on a PR/MR to ask for a review of its current
   head. Only people who can push (GitHub owners, members and collaborators;
-  GitLab Developer or above) can.
+  GitLab Developer or above) can. On GitHub this is the commenter's
+  repository role, read through the Metadata permission (an App) or the
+  token's repository access; a connection that cannot read it refuses the
+  command.
 - Add a focus to ask that review to look hardest at one area:
   `/sentryward review focus on the auth and session logic` (also
   `focus: ...` or `focus ...`). It is a priority, not a filter: problems

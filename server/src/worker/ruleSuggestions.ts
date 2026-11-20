@@ -3,7 +3,7 @@ import type { Resolve } from "../lib/hostSafety.ts";
 import { prisma } from "../lib/prisma.ts";
 import { resolveDashboardLayers } from "../review/config/load.ts";
 import type { Rule } from "../review/config/schema.ts";
-import { preselect, storedEvidence, validateSuggestions, type EvidenceItem } from "../review/learn/suggest.ts";
+import { preselect, repoLabel, storedEvidence, validateSuggestions, type EvidenceItem } from "../review/learn/suggest.ts";
 import { abortableGenerate, createGenerate, modelChain, type ApiKeys, type Endpoint, type Generate, type ProviderBaseUrls } from "../review/llm/providers.ts";
 import { suggestRules } from "../review/llm/ruleSuggest.ts";
 import { llmCredentialsFor } from "../services/llm.ts";
@@ -91,10 +91,6 @@ export async function runNextRuleSuggestions(now = new Date(), deps: RuleSuggest
     console.error("[worker] rule suggestions failed for workspace %s", workspaceId, err);
     return { workspaceId, outcome: "failed", reason: err instanceof Error ? err.message : String(err) };
   }
-}
-
-function repoLabel(repo: { host: string; fullPath: string }): string {
-  return `${repo.host}/${repo.fullPath}`;
 }
 
 // `since` is the retention cutoff (ruleHistoryCutoff), not the bare history

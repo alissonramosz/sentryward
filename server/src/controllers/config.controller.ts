@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import type { Prisma, PrismaClient } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { settingsRevision } from "../lib/settingsRevision.ts";
@@ -49,7 +50,16 @@ function globalConfigBody(saved: unknown) {
 // repository's own rules out; the owner is told which repositories lost them,
 // on every read until it is fixed.
 async function repositoryRuleWarnings(workspaceId: string, globalSettings: unknown): Promise<string[]> {
-  const repos = await prisma.repository.findMany({
+  return repositoryRuleIssues(await loadRuleRepositories(prisma, workspaceId), globalSettings);
+}
+
+export type RuleRepository = { fullPath: string; settings: unknown; directories: unknown };
+
+// The workspace's repositories with rules of their own (or in a folder) that
+// the global settings apply under. Shared with rule suggestion approvals, so
+// what an approval refuses and what this page warns about cannot drift apart.
+export async function loadRuleRepositories(db: PrismaClient | Prisma.TransactionClient, workspaceId: string): Promise<RuleRepository[]> {
+  const repos = await db.repository.findMany({
     where: { connection: { workspaceId }, followGlobal: false },
     select: { fullPath: true, settings: true, directories: true },
   });
@@ -57,13 +67,20 @@ async function repositoryRuleWarnings(workspaceId: string, globalSettings: unkno
     const rules = (settings as { rules?: unknown[] } | null)?.rules;
     return Array.isArray(rules) && rules.length > 0;
   };
-  return repos.flatMap((repo) => {
+  return repos.filter((repo) => {
     const directories = Array.isArray(repo.directories) ? (repo.directories as { settings?: unknown }[]) : [];
-    if (!hasRules(repo.settings) && !directories.some((dir) => hasRules(dir?.settings))) return [];
-    return repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
-      (issue) => `${repo.fullPath}: ${issue.message}`,
-    );
+    return hasRules(repo.settings) || directories.some((dir) => hasRules(dir?.settings));
   });
+}
+
+// The repository and folder rules these global settings leave out, one
+// message each, prefixed with the repository.
+export function repositoryRuleIssues(repos: RuleRepository[], globalSettings: unknown): string[] {
+  return repos.flatMap((repo) =>
+    repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
+      (issue) => `${repo.fullPath}: ${issue.message}`,
+    ),
+  );
 }
 
 export async function getGlobalConfig(req: Request, res: Response) {

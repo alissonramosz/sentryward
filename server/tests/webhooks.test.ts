@@ -393,6 +393,31 @@ describe("POST /api/webhooks/github", () => {
     expect(await prisma.reviewJob.count()).toBe(0);
   });
 
+  it("refuses the command when the connection cannot read the commenter's role, and fails cleanly when GitHub is down", async () => {
+    await githubRepo();
+    const token = {
+      method: "POST",
+      url: /\/app\/installations\/55\/access_tokens$/,
+      body: { token: "inst", expires_at: new Date(Date.now() + 3600_000).toISOString() },
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([token, { url: /\/collaborators\/alice\/permission$/, status: 403, body: { message: "Resource not accessible by integration" } }]).fetch,
+    );
+    const refused = await sendGithub("issue_comment", commentEvent("MEMBER"));
+    expect(refused.status).toBe(202);
+    expect(refused.body.outcome).toBe("not_allowed");
+
+    vi.stubGlobal("fetch", fetchStub([token, { url: /\/collaborators\/alice\/permission$/, status: 502, body: { message: "Bad Gateway" } }]).fetch);
+    const failed = await sendGithub("issue_comment", commentEvent("MEMBER"));
+    expect(failed.status).toBe(500);
+    expect(failed.body.outcome).toBe("failed");
+    expect(await prisma.reviewJob.count()).toBe(0);
+  });
+
   it("detaches an uninstalled installation but keeps its review history", async () => {
     const repo = await githubRepo();
     await prisma.reviewJob.create({ data: { repositoryId: repo.id, number: 42, headSha: "sha1", trigger: "manual" } });

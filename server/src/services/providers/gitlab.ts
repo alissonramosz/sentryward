@@ -192,6 +192,8 @@ export const gitlabProvider: ProviderDefinition = {
         // to store it cannot wait for a delivery without a thread. The reply is
         // handled first, then the delivery fails so GitLab can redeliver it:
         // both handlers answer "duplicate" for what they already recorded.
+        // Only a failure a retry could fix: GitLab disables a hook that keeps
+        // failing, which would stop automatic reviews too.
         if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
         return reply;
       }

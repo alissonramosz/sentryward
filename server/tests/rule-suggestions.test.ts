@@ -184,6 +184,25 @@ describe("capturing review comments", () => {
     expect((await sendGithub("pull_request_review_comment", commentEvent(LONG))).body.outcome).toBe("recorded");
   });
 
+  it("fails the delivery when a reply in a people's thread cannot be recorded", async () => {
+    await githubRepo();
+    await enable();
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([GH_TOKEN, { url: /\/repos\/acme\/web\/collaborators\/alice\/permission$/, status: 502, body: { message: "Bad Gateway" } }]).fetch,
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const reply = commentEvent(LONG, { id: 702, in_reply_to_id: 650 });
+
+    const failed = await sendGithub("pull_request_review_comment", reply);
+    expect(failed.status).toBe(500);
+    expect(failed.body.outcome).toBe("failed");
+
+    vi.stubGlobal("fetch", fetchStub([GH_TOKEN, ...ghRoles()]).fetch);
+    expect((await sendGithub("pull_request_review_comment", reply)).status).toBe(202);
+    expect(await prisma.reviewComment.count()).toBe(1);
+  });
+
   it("skips bots, commands, markers, short remarks, outsiders and excluded reviewers", async () => {
     await githubRepo();
     await enable({ ruleSuggestionsExcludedReviewers: ["Carol"] });
@@ -346,6 +365,40 @@ describe("capturing review comments", () => {
     vi.stubGlobal("fetch", fetchStub([{ url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 } }]).fetch);
     expect((await sendGitlab(repo.id, note)).body.outcome).toBe("ignored");
     expect(await prisma.reviewComment.findMany()).toMatchObject([{ number: 7, forgeCommentId: "1" }]);
+  });
+
+  it("stores a GitLab note without NUL characters, and does not fail deliveries a retry cannot fix", async () => {
+    const repo = await gitlabRepo();
+    await enable();
+    vi.stubGlobal(
+      "fetch",
+      fetchStub([
+        { url: /\/projects\/77\/members\/all\/5$/, body: { access_level: 30 }, times: 1 },
+        // Then the connection may no longer read members: every redelivery would fail the same way.
+        { url: /\/projects\/77\/members\/all\/5$/, status: 403, body: { message: "403 Forbidden" } },
+      ]).fetch,
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const note = (id: number) => ({
+      object_kind: "note",
+      user: { id: 5, username: "alice" },
+      object_attributes: {
+        id,
+        noteable_type: "MergeRequest",
+        type: "DiffNote",
+        discussion_id: "disc9",
+        note: `${LONG}\u0000`,
+        position: { new_path: "lib/\u0000db.rb", new_line: 4 },
+      },
+      merge_request: { iid: 7, last_commit: { id: "glsha" } },
+    });
+
+    expect((await sendGitlab(repo.id, note(1))).status).toBe(202);
+    expect(await prisma.reviewComment.findMany()).toMatchObject([{ forgeCommentId: "1", body: LONG, file: "lib/db.rb" }]);
+
+    const refused = await sendGitlab(repo.id, note(2));
+    expect(refused.status).toBe(202);
+    expect(await prisma.reviewComment.count()).toBe(1);
   });
 
   it("asks GitLab once per note who the author is, though both handlers need it", async () => {
@@ -983,6 +1036,56 @@ describe("rule suggestions API", () => {
     expect(await prisma.ruleSuggestion.findUniqueOrThrow({ where: { id: decided.id } })).toMatchObject({ repositoryId: null });
   });
 
+  it("drops a deleted repository's excerpts and ids from suggestions citing it", async () => {
+    const repo = await githubRepo();
+    const other = await prisma.repository.create({
+      data: { connectionId: repo.connectionId, provider: "github", host: "github.com", fullPath: "acme/api", externalId: "901", defaultBranch: "main", enabled: true },
+    });
+    const excerpt = (repository: string, kind: string, text: string) => ({ kind, repository, number: 1, file: "a.ts", text });
+    const row = await prisma.ruleSuggestion.create({
+      data: {
+        workspaceId,
+        rule: RULE,
+        rationale: "",
+        model: "m",
+        evidence: {
+          findingIds: [],
+          commentIds: [],
+          changes: 3,
+          excerpts: [
+            excerpt("github.com/acme/web", "comment", "web comment"),
+            excerpt("github.com/acme/web", "dismissal", "web dismissal"),
+            excerpt("github.com/acme/api", "comment", "api comment"),
+          ],
+        },
+      },
+    });
+    const finding = await trackFinding(repo.id, 1);
+    await prisma.finding.update({ where: { id: finding.id }, data: { suggestionId: row.id } });
+    const a = await prisma.reviewComment.create({
+      data: { repositoryId: repo.id, number: 1, forgeCommentId: "1", author: "alice", body: LONG, file: "a.ts", suggestionId: row.id },
+    });
+    const b = await prisma.reviewComment.create({
+      data: { repositoryId: other.id, number: 1, forgeCommentId: "2", author: "bob", body: LONG, file: "a.ts", suggestionId: row.id },
+    });
+    await prisma.ruleSuggestion.update({
+      where: { id: row.id },
+      data: { evidence: { ...(row.evidence as object), findingIds: [finding.id], commentIds: [a.id, b.id] } },
+    });
+    vi.stubGlobal("fetch", fetchStub([]).fetch);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect((await request(app).delete(`/api/repos/${repo.id}`).set("Cookie", cookie)).status).toBe(204);
+    const evidence = (await prisma.ruleSuggestion.findUniqueOrThrow({ where: { id: row.id } })).evidence as {
+      findingIds: string[];
+      commentIds: string[];
+      excerpts: { text: string }[];
+    };
+    expect(evidence.excerpts.map((e) => e.text)).toEqual(["api comment"]);
+    expect(evidence.commentIds).toEqual([b.id]);
+    expect(evidence.findingIds).toEqual([]);
+  });
+
   it("approves into the global settings, edited, once", async () => {
     await prisma.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: { profile: "strict" } } });
     const row = await suggestion();
@@ -1041,6 +1144,39 @@ describe("rule suggestions API", () => {
     const res = await request(app).post(`/api/rule-suggestions/${row.id}/approve`).set("Cookie", cookie).send({ rule: RULE, target: "global" });
     expect(res.status).toBe(400);
     expect(res.body.errors["rule.id"]).toBeDefined();
+  });
+
+  it("refuses a global rule that would push out a repository's or folder's rule", async () => {
+    const repo = await githubRepo();
+    await prisma.repository.update({ where: { id: repo.id }, data: { followGlobal: false, settings: { rules: [RULE] } } });
+    const approve = async (rule: object) =>
+      request(app)
+        .post(`/api/rule-suggestions/${(await suggestion()).id}/approve`)
+        .set("Cookie", cookie)
+        .send({ rule, target: "global" });
+
+    const onRepo = await approve(RULE);
+    expect(onRepo.status).toBe(400);
+    expect(onRepo.body.errors["rule.id"][0]).toContain("acme/web");
+
+    await prisma.repository.update({
+      where: { id: repo.id },
+      data: { settings: {}, directories: [{ path: "src/billing", settings: { rules: [RULE] } }] },
+    });
+    const onFolder = await approve(RULE);
+    expect(onFolder.status).toBe(400);
+    expect(onFolder.body.errors["rule.id"][0]).toContain("src/billing");
+    expect((await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId } })).reviewSettings).toEqual({});
+  });
+
+  it("does not let a repository already left out block an unrelated global rule", async () => {
+    const clash = { ...RULE, id: "clash" };
+    await prisma.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: { rules: [clash] } } });
+    const repo = await githubRepo();
+    await prisma.repository.update({ where: { id: repo.id }, data: { followGlobal: false, settings: { rules: [clash] } } });
+    const row = await suggestion();
+    const res = await request(app).post(`/api/rule-suggestions/${row.id}/approve`).set("Cookie", cookie).send({ rule: RULE, target: "global" });
+    expect(res.status).toBe(200);
   });
 
   it("approves into a repository's own settings, but not one following the global config", async () => {

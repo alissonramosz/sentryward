@@ -3,12 +3,14 @@ import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { Prisma } from "../generated/prisma/client.ts";
 import { dashboardOverrideSchema, type DashboardOverride, type Rule } from "../review/config/schema.ts";
+import { repoLabel, type StoredEvidence } from "../review/learn/suggest.ts";
 import {
   approveRuleSuggestionSchema,
   listRuleSuggestionsQuerySchema,
   ruleSuggestionIdParamSchema,
   saveRuleSuggestionSettingsSchema,
 } from "../schemas/ruleSuggestions.schema.ts";
+import { loadRuleRepositories, repositoryRuleIssues } from "./config.controller.ts";
 import { requireRepoSettingsRules } from "./repos.controller.ts";
 
 // Rule suggestions drafted by worker/ruleSuggestions.ts. Nothing reaches a
@@ -122,6 +124,37 @@ async function stripCommentExcerpts(tx: Prisma.TransactionClient, workspaceId: s
     ))
     WHERE id = ANY(${locked.map((row) => row.id)}::uuid[])
   `;
+}
+
+// Drops a repository that is being deleted from the suggestions citing it:
+// its excerpts (people's words, matched by the label evidence names it with)
+// and the ids of its comments and findings, which go with it. Suggestions for
+// other repositories or the global settings keep the rest of their evidence.
+// Locked in id order, as stripCommentExcerpts does.
+export async function stripRepositoryEvidence(tx: Prisma.TransactionClient, repo: { id: string; host: string; fullPath: string }) {
+  const [comments, findings] = [
+    await tx.reviewComment.findMany({ where: { repositoryId: repo.id, suggestionId: { not: null } }, select: { id: true, suggestionId: true } }),
+    await tx.finding.findMany({ where: { repositoryId: repo.id, suggestionId: { not: null } }, select: { id: true, suggestionId: true } }),
+  ];
+  const suggestionIds = [...new Set([...comments, ...findings].map((row) => row.suggestionId!))];
+  if (!suggestionIds.length) return;
+  const rows = await tx.$queryRaw<{ id: string; evidence: unknown }[]>`
+    SELECT id, evidence FROM rule_suggestions WHERE id = ANY(${suggestionIds}::uuid[]) ORDER BY id FOR UPDATE
+  `;
+  const label = repoLabel(repo);
+  const commentIds = new Set(comments.map((row) => row.id));
+  const findingIds = new Set(findings.map((row) => row.id));
+  for (const row of rows) {
+    const evidence = row.evidence as Partial<StoredEvidence> | null;
+    if (!evidence || typeof evidence !== "object") continue;
+    const next = {
+      ...evidence,
+      ...(Array.isArray(evidence.excerpts) ? { excerpts: evidence.excerpts.filter((excerpt) => excerpt?.repository !== label) } : {}),
+      ...(Array.isArray(evidence.commentIds) ? { commentIds: evidence.commentIds.filter((id) => !commentIds.has(id)) } : {}),
+      ...(Array.isArray(evidence.findingIds) ? { findingIds: evidence.findingIds.filter((id) => !findingIds.has(id)) } : {}),
+    };
+    await tx.ruleSuggestion.update({ where: { id: row.id }, data: { evidence: next as Prisma.InputJsonValue } });
+  }
 }
 
 // Turning suggestions off deletes the review comments kept for them, and the
@@ -243,6 +276,15 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
     let appliedTarget: string;
     if (target === "global") {
       const settings = withRule(workspace!.review_settings, rule, "global");
+      // Global rules win, so one taking a repository or folder rule's id would
+      // silently drop that rule from its reviews. Refused here, as a repository
+      // approval is; repositories already left out stay a config page warning
+      // and do not block. Repository and folder saves take this workspace's
+      // lock first, so none can add a clashing rule while this commits.
+      const repos = await loadRuleRepositories(tx, workspaceId);
+      const before = new Set(repositoryRuleIssues(repos, workspace!.review_settings));
+      const issues = repositoryRuleIssues(repos, settings).filter((issue) => !before.has(issue));
+      if (issues.length) throw new HttpError(400, "Validation failed", { "rule.id": issues });
       await tx.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: settings } });
       appliedTarget = "global";
     } else {

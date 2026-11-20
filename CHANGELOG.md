@@ -23,12 +23,16 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   the feature is turned off is never kept. The excluded-reviewers list
   (`workspaces.rule_suggestions_excluded_reviewers`) is `NOT NULL`, so a
   `NULL` written outside the app is refused instead of crashing comment
-  storage or the settings page. On GitHub, a top-level diff comment that cannot
-  be stored (a failed permission lookup or database error) fails the webhook
-  delivery with a 500, so it shows as failed and can be redelivered; a reply
-  in a thread still goes on to the reply handling. On GitLab, where every
-  diff note is in a discussion, a note that cannot be stored fails the
-  delivery with a 500 after the reply handling has run.
+  storage or the settings page. A diff comment that cannot be stored for a
+  reason a retry could fix (a permission lookup the forge failed, a database
+  error) fails the webhook delivery with a 500 after any reply handling has
+  run, on GitHub (a reply in a person's own thread included) and GitLab alike,
+  so it shows as failed and can be redelivered. One that would fail the same
+  way every time (a value the database refuses, a permission lookup the
+  connection may not make) is logged and the delivery succeeds, so GitLab does
+  not disable the hook, and automatic reviews with it, over a comment that can
+  never be kept. NUL characters are removed from a comment and its path
+  before storing, as Postgres text cannot hold them.
   Once a week per workspace (or on **Check now**, at most hourly, counted from
   the request as well as the last run so a queued check cannot be requested
   again; `workspaces.rule_suggestions_requested_at`) the worker
@@ -42,7 +46,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   comment or dismissal backs one suggestion at most. Suggestions wait for an
   admin, who can edit one and approve it into the global settings or a
   repository's own settings through the same checks as a manual save, or
-  discard it. New endpoints under `/api/rule-suggestions` (`/counts` feeds the
+  discard it. Approving into the global settings is refused (`rule.id` field
+  error) when the rule would take the id of a repository or folder rule, which
+  global rules would silently replace; repositories already left out by the
+  global rules stay a config page warning and do not block it. New endpoints under `/api/rule-suggestions` (`/counts` feeds the
   nav badge without loading the list); review comments and the suggestion
   excerpts quoting them are deleted after 90 days, by privacy retention, and
   when the feature is turned off, and an excluded reviewer's go with them.
@@ -72,7 +79,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   refused with a 400. A page holds only suggestions still in the
   requested status; one decided while the page loads is left out. Worker shutdown waits for a running suggestion pass before
   disconnecting from the database.
-  Removing a repository deletes its pending suggestions. The page leads with the suggestions: settings fold into a header showing
+  Removing a repository deletes its pending suggestions, and removes its
+  excerpts and cited comment and dismissal ids from other suggestions. The page leads with the suggestions: settings fold into a header showing
   whether learning is on, the last check and **Check now** (open by default only
   while off). Cards carry the rule's severity colour, the rationale and a
   foldable evidence summary. Discarding asks for confirmation, and approving into
@@ -586,7 +594,14 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - On GitHub, `/sentryward review` now requires push access to the repository,
   checked by the commenter's repository role, as for thread replies. A comment's
   author association does not tell read and triage collaborators from writers,
-  so they could previously start a review billed to the workspace.
+  so they could previously start a review billed to the workspace. A
+  connection that may not read the commenter's role refuses the command
+  (`not_allowed`); a rate limit or forge outage fails the delivery with a 500
+  so it can be redelivered.
+- Saving a repository's settings or a folder checks its rules against the
+  global settings read under a lock on the workspace, the one approvals and
+  global saves take, so a global rule added at the same moment can no longer
+  slip past the check and silently replace a repository or folder rule.
 - The Recent reviews lists on the Home and Usage pages label an untitled
   GitLab merge request as `Merge request !42` and an untitled GitHub pull
   request as `Pull request #42`, instead of `#42`, and the Usage list writes a

@@ -223,7 +223,11 @@ export async function handleGithubEvent(
       if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
       return { body: { outcome: stored === "stored" ? "recorded" : "ignored" } };
     }
-    return recordThreadReply({
+    // A reply is handled first, then a failure to store the comment fails the
+    // delivery as above (a reply in a person's own thread is evidence too).
+    // A redelivery is safe: both handlers answer "duplicate" for what they
+    // already recorded.
+    const reply = await recordThreadReply({
       repo,
       forge,
       number,
@@ -235,6 +239,8 @@ export async function handleGithubEvent(
       allowed,
       threadRoot,
     });
+    if (stored === "failed") return { status: 500, body: { outcome: "failed" } };
+    return reply;
   }
 
   // Only people who can already push may start a (billed) review. Checked by
@@ -242,9 +248,24 @@ export async function handleGithubEvent(
   // also covers read and triage collaborators.
   const forge = adapterFor(repo.connection);
   const login = payload.comment!.user?.login;
-  if (!login || !(await forge.canPush(repo.fullPath, login))) {
-    return { body: { outcome: "not_allowed" } };
+  let allowed = false;
+  if (login) {
+    try {
+      allowed = await forge.canPush(repo.fullPath, login);
+    } catch (err) {
+      // A connection that may not read collaborator permissions cannot show
+      // the commenter may push, so the command is refused like an outsider's.
+      // Anything else (rate limit, forge down) fails the delivery cleanly so
+      // it can be redelivered.
+      if (err instanceof ForgeError && err.status === 403 && !err.rateLimited) {
+        console.warn("[webhook] cannot read %s's permission on %s; refusing the review command", login, repo.fullPath);
+      } else {
+        console.error("[webhook] permission lookup for the review command on %s failed", repo.fullPath, err);
+        return { status: 500, body: { outcome: "failed" } };
+      }
+    }
   }
+  if (!allowed) return { body: { outcome: "not_allowed" } };
   const number = payload.issue!.number;
   const head = await forge.getChangeHead(repo.fullPath, number);
   const job = await enqueue({
