@@ -13,3 +13,7 @@ export function settingsRevision(saved: unknown): string {
     .digest("hex")
     .slice(0, 16);
 }
+
+// The answer to a settings save sent without a revision. Most likely a page
+// loaded before saves carried one, so it asks for a reload like a stale save.
+export const MISSING_REVISION_MESSAGE = "This page is out of date; reload it and save again";

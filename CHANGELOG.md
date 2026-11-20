@@ -496,7 +496,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 - API callers that save settings must now send the revision they read:
   `revision` (from `GET /api/config/global`) on `PUT /api/config/global`, and
   `settingsRevision` (from `GET /api/repos`) on a `PATCH /api/repos/:id` that
-  sends `settings`. Saves without one are refused with a 400.
+  sends `settings`. Saves without one are refused with a 409 asking to reload
+  the page (what a settings page loaded before upgrading shows when it saves).
 
 ### Changed
 
@@ -607,7 +608,7 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   a `settingsRevision`, derived from the saved settings, and a save must send
   them back: `PUT /api/config/global` requires `revision`, and
   `PATCH /api/repos/:id` requires `settingsRevision` whenever it sends
-  `settings` (a 400 otherwise), so no save can replace a rule approved since
+  `settings` (a 409 asking to reload otherwise), so no save can replace a rule approved since
   its settings were read.
 - On GitHub, `/sentryward review` now requires push access to the repository,
   checked by the commenter's repository role, as for thread replies. A comment's

@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import type { Prisma, PrismaClient } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
-import { settingsRevision } from "../lib/settingsRevision.ts";
+import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevision.ts";
 import { CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW } from "../review/context/budget.ts";
 import { CATEGORIES, SEVERITIES } from "../review/core/severity.ts";
 import { THINKING_BUDGETS } from "../review/llm/thinking.ts";
@@ -99,6 +99,9 @@ async function globalConfigResponse(workspaceId: string, saved: unknown) {
 
 export async function updateGlobalConfig(req: Request, res: Response) {
   const { settings, revision } = updateGlobalConfigSchema.parse(req.body);
+  // Before any other check, so a page loaded before revisions existed is told
+  // to reload rather than shown an error about its settings.
+  if (revision === undefined) throw new HttpError(409, MISSING_REVISION_MESSAGE);
   if (!settings.llm?.connection) {
     throw new HttpError(400, "Validation failed", { connection: ["Select an LLM connection"] });
   }

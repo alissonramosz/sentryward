@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import { Prisma, type ReviewStatus, type ReviewVerdict } from "../generated/prisma/client.ts";
 import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
-import { settingsRevision } from "../lib/settingsRevision.ts";
+import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevision.ts";
 import { dropRepositoriesFromTargets } from "../services/notifications.ts";
 import { loadReviewConfig, repoSettingsRuleIssues, resolveDashboardLayers } from "../review/config/load.ts";
 import { directorySettingsSchema, normalizeDirectory, type DashboardOverride, type DirectorySetting } from "../review/config/schema.ts";
@@ -209,6 +209,9 @@ export async function updateRepo(req: Request, res: Response) {
   const { id } = repoIdParamSchema.parse(req.params);
   const { enabled, settings, settingsRevision: revision, followGlobal } = updateRepoSchema.parse(req.body);
   const existing = await loadOwnedRepo(req.workspaceId!, id);
+  // Required with settings, but checked here rather than in the schema so a
+  // page loaded before revisions existed is told to reload.
+  if (settings !== undefined && revision === undefined) throw new HttpError(409, MISSING_REVISION_MESSAGE);
 
   await requireSettingsConnection(req.workspaceId!, settings);
 
@@ -230,7 +233,7 @@ export async function updateRepo(req: Request, res: Response) {
         select: { settings: true, directories: true, followGlobal: true },
       });
       if (settings !== undefined) {
-        // The schema requires a revision whenever settings are sent.
+        // Sent whenever settings are (checked above).
         if (revision !== settingsRevision(saved.settings)) {
           throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
         }

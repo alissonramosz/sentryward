@@ -29,7 +29,9 @@ export const enableRepoSchema = z.object({
 // editing different folders never overwrite each other. `settingsRevision`
 // is the one the form loaded: a save made after the settings changed is
 // refused (lib/settingsRevision.ts). Required with `settings`, as a write
-// without one could replace a rule approved since the caller read them.
+// without one could replace a rule approved since the caller read them; the
+// controller enforces that with a 409 "reload" answer, so a page loaded before
+// revisions existed is told to reload instead of failing validation.
 export const updateRepoSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -40,10 +42,6 @@ export const updateRepoSchema = z
   .refine((body) => body.enabled !== undefined || body.settings !== undefined || body.followGlobal !== undefined, {
     message: "Provide enabled, settings or followGlobal",
     path: ["enabled"],
-  })
-  .refine((body) => body.settings === undefined || body.settingsRevision !== undefined, {
-    message: "Send the settingsRevision the settings were loaded with",
-    path: ["settingsRevision"],
   });
 
 export const repoIdParamSchema = z.object({ id: z.uuid() });

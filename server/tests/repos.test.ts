@@ -670,8 +670,10 @@ describe("GET and PUT /api/config/global", () => {
       .put("/api/config/global")
       .set("Cookie", cookie)
       .send({ settings: { llm: { connection: "openai" } } });
-    expect(unchecked.status).toBe(400);
-    expect(unchecked.body.errors.revision).toBeDefined();
+    // A 409 asking for a reload, as a page loaded before revisions existed
+    // sends none.
+    expect(unchecked.status).toBe(409);
+    expect(unchecked.body.message).toMatch(/reload/);
     expect((await prisma.workspace.findUniqueOrThrow({ where: { id: workspace.id } })).reviewSettings).toEqual({
       llm: { connection: "openai" },
       profile: "strict",
@@ -702,8 +704,8 @@ describe("GET and PUT /api/config/global", () => {
 
     // Required with settings, but not to turn the repository on or off.
     const unchecked = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ settings: {} });
-    expect(unchecked.status).toBe(400);
-    expect(unchecked.body.errors.settingsRevision).toBeDefined();
+    expect(unchecked.status).toBe(409);
+    expect(unchecked.body.message).toMatch(/reload/);
     expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).settings).toEqual({ profile: "strict" });
     const toggled = await request(app).patch(`/api/repos/${repo.id}`).set("Cookie", cookie).send({ followGlobal: true });
     expect(toggled.status).toBe(200);
