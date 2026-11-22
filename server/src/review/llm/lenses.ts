@@ -4,7 +4,8 @@ import type { Config, Specialist } from "../config/schema.ts";
 // general pass; a deep review (review.deep) adds one specialist pass per chunk
 // for each selected specialist, each told to look for one kind of defect
 // only. Narrow instructions find what a general pass skims over, at the cost
-// of one model call per specialist per pass.
+// of one additional pass per specialist, which may make multiple model calls
+// in agentic mode.
 export interface Lens {
   // "general" for the general pass, otherwise the specialist's name.
   id: string;

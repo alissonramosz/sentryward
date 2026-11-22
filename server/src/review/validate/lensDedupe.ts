@@ -47,14 +47,21 @@ function sameProblem(a: Finding, b: Finding): boolean {
 export function mergeAcrossLenses(findings: Finding[]): { findings: Finding[]; merged: number } {
   const ordered = [...findings].sort((a, b) => Number(a.reviewer !== undefined) - Number(b.reviewer !== undefined));
   const kept: Finding[] = [];
+  // Every pass that reported each kept problem (undefined is the general
+  // pass). The kept report can be swapped for a stronger one, so its own
+  // reviewer does not say who already contributed: checking it alone would let
+  // a pass merge a second report once another pass's report replaced its first.
+  const contributors: Set<string | undefined>[] = [];
   let merged = 0;
   for (const finding of ordered) {
-    const index = kept.findIndex((other) => other.reviewer !== finding.reviewer && sameProblem(other, finding));
+    const index = kept.findIndex((other, i) => !contributors[i]!.has(finding.reviewer) && sameProblem(other, finding));
     if (index === -1) {
       kept.push(finding);
+      contributors.push(new Set([finding.reviewer]));
       continue;
     }
     kept[index] = stronger(kept[index]!, finding);
+    contributors[index]!.add(finding.reviewer);
     merged += 1;
   }
   return { findings: kept.sort(compareFindings), merged };

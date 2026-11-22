@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { parseRepoFile } from "../src/review/config/repoFile.ts";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import { SPECIALISTS, configOverrideSchema, type Config, type ConfigOverride } from "../src/review/config/schema.ts";
+import type { ContextSource } from "../src/review/context/gather.ts";
 import type { Finding } from "../src/review/core/models.ts";
+import type { AgenticRequest, AgenticResponse, GenerateAgentic } from "../src/review/llm/agentic.ts";
 import { SPECIALIST_INSTRUCTIONS, lensesFor } from "../src/review/llm/lenses.ts";
 import { reviewSystemPrompt } from "../src/review/llm/prompt.ts";
 import type { GenerateRequest } from "../src/review/llm/providers.ts";
@@ -48,7 +50,10 @@ function finding(overrides: Partial<Finding> = {}): Finding {
 
 describe("deep review config", () => {
   it("is off by default, with every specialist selected", () => {
-    expect(config().review.deep).toEqual({ enabled: false, specialists: [...SPECIALISTS] });
+    expect(config().review.deep).toEqual({
+      enabled: false,
+      specialists: ["naming", "invariants", "boundaries", "contracts", "tests", "leaks", "consistency"],
+    });
     expect(lensesFor(config()).map((lens) => lens.id)).toEqual(["general"]);
   });
 
@@ -216,6 +221,61 @@ describe("runReview with deep review", () => {
     expect(result.warnings.filter((warning) => warning.includes("dropped"))).toEqual([]);
   });
 
+  it("leaves half the agentic searches to the general passes and tags the specialist's findings", async () => {
+    const searched: string[] = [];
+    const context: ContextSource = {
+      readFile: async () => null,
+      searchCode: async (term) => {
+        searched.push(term);
+        return [];
+      },
+    };
+    // Calls the pass's search tool the way the SDK would, without a model.
+    const search = (request: AgenticRequest<unknown>, term: string) =>
+      (request.tools.search_code as unknown as { execute: (input: unknown, options: unknown) => Promise<string> }).execute(
+        { term },
+        { toolCallId: "t", messages: [], context: {} },
+      );
+    // The general pass waits for the specialist to spend what it can, so the
+    // test shows the specialist stopping at the reserve rather than the general
+    // pass simply getting there first.
+    let specialistDone!: () => void;
+    const specialistFinished = new Promise<void>((resolve) => (specialistDone = resolve));
+    const generateAgentic: GenerateAgentic = async <T>(request: AgenticRequest<T>): Promise<AgenticResponse<T>> => {
+      const req = request as AgenticRequest<unknown>;
+      const specialist = req.system?.includes(SPECIALIST_INSTRUCTIONS.tests);
+      if (specialist) {
+        for (const term of ["s1", "s2", "s3", "s4"]) await search(req, term);
+        specialistDone();
+      } else {
+        await specialistFinished;
+        for (const term of ["g1", "g2", "g3"]) await search(req, term);
+      }
+      const findings = specialist
+        ? [modelFinding({ title: "The new branch has no test", category: "testing", severity: "minor" })]
+        : [modelFinding()];
+      return { object: { findings } as T, model: request.model, inputTokens: 900, outputTokens: 60, latencyMs: 9, steps: 2, toolCalls: {} };
+    };
+
+    const result = await runReview(
+      {
+        changeSet: makeChangeSet(),
+        config: deep(["tests"], { review: { context: "agentic", agent: { maxSearches: 4 } } }),
+      },
+      { generate: fakeModel({}).generate, generateAgentic, context, concurrency: 2 },
+    );
+
+    // 4 searches in all: the specialist stops at 2, leaving 2 for the general
+    // pass. Context gathering searches too, outside the passes' budget.
+    expect(searched.filter((term) => /^[sg]\d$/.test(term))).toEqual(["s1", "s2", "g1", "g2"]);
+    expect(result.status).toBe("completed");
+    expect(result.findings.map((f) => [f.title, f.reviewer])).toEqual([
+      ["b overflows for large a", undefined],
+      ["The new branch has no test", "tests"],
+    ]);
+    expect(result.usage.filter((call) => call.purpose === "review").map((call) => call.lens)).toEqual([undefined, "tests"]);
+  });
+
   it("merges a specialist's rewording of a general finding, but not a different problem", async () => {
     const { generate } = fakeModel({
       code_review: (request: GenerateRequest<unknown>) =>
@@ -264,5 +324,16 @@ describe("mergeAcrossLenses", () => {
 
     const stronger = mergeAcrossLenses([finding({ fingerprint: "g" }), finding({ reviewer: "tests", severity: "critical", fingerprint: "s" })]);
     expect(stronger.findings.map((f) => f.fingerprint)).toEqual(["s"]);
+  });
+
+  it("never merges two reports from one pass, even after another pass's report replaced the first", () => {
+    const result = mergeAcrossLenses([
+      finding({ severity: "minor", fingerprint: "g" }),
+      finding({ reviewer: "naming", severity: "major", fingerprint: "a1" }),
+      finding({ reviewer: "tests", severity: "critical", fingerprint: "b1" }),
+      finding({ reviewer: "naming", title: "b overflows for very large a", fingerprint: "a2" }),
+    ]);
+    expect(result.merged).toBe(2);
+    expect(result.findings.map((f) => f.fingerprint)).toEqual(["b1", "a2"]);
   });
 });
