@@ -187,10 +187,15 @@ export const findingSchema = z.object({
   source: z.enum(["llm", "tool", "rule"]),
   tool: z.string().optional(),
   ruleId: z.string().optional(),
-  // The extra pass that raised it: a deep review specialist (llm/lenses.ts).
+  // The extra pass that raised it: a deep review specialist or a custom
+  // reviewer (llm/lenses.ts).
   // Absent for the general pass, and not part of the fingerprint, so a problem
   // found by a specialist one run and the general pass the next is one finding.
   reviewer: z.string().optional(),
+  // A custom reviewer's name (config.reviewers), copied onto the finding so
+  // the stored result and the forge comment name it even after the reviewer
+  // is renamed or removed. Absent for the general pass and the specialists.
+  reviewerName: z.string().optional(),
   // What the model said the finding rests on; checked before publishing and
   // never part of the fingerprint. Absent when it named none.
   claim: claimSchema.optional(),

@@ -4,6 +4,7 @@ import { FORGE_TIMEOUT_MS } from "../review/forge/http.ts";
 import { prisma } from "../lib/prisma.ts";
 import type { Prisma, Repository, ReviewJob, ReviewTrigger } from "../generated/prisma/client.ts";
 import { loadDashboardConfigs } from "../review/config/load.ts";
+import type { CustomReviewer } from "../review/config/schema.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 import { normalizeFocus, type ReviewProgress } from "../review/core/models.ts";
 
@@ -22,6 +23,14 @@ export interface EnqueueInput {
   focus?: string | null;
   // A deep review for this run only (see ReviewJob.deep).
   deep?: boolean;
+}
+
+// A custom reviewer tried on a change before it is saved (see ReviewJob.trial).
+export interface TrialInput {
+  repositoryId: string;
+  number: number;
+  headSha: string;
+  reviewer: CustomReviewer;
 }
 
 // Every write that queues, supersedes or cancels a change's queued jobs takes
@@ -56,6 +65,8 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
         number: input.number,
         headSha: input.headSha,
         status: { in: ["queued", "running"] },
+        // A trial answers nobody's request for a review.
+        trial: false,
         ...(input.focus ? { focus: input.focus } : {}),
         ...(input.deep ? { deep: true } : {}),
       },
@@ -68,6 +79,24 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
   });
 }
 
+// A trial neither supersedes nor is superseded by the change's reviews: it
+// publishes nothing, so it cannot race them on the forge, and a push must not
+// throw away a trial someone is waiting on. The change's lease still runs the
+// two one at a time. Each request is its own trial (drafts differ), so there
+// is no duplicate check either.
+export async function enqueueTrial(input: TrialInput): Promise<ReviewJob> {
+  return prisma.reviewJob.create({
+    data: {
+      repositoryId: input.repositoryId,
+      number: input.number,
+      headSha: input.headSha,
+      trigger: "manual",
+      trial: true,
+      trialReviewer: input.reviewer,
+    },
+  });
+}
+
 // The caller holds the change's lock and has checked the head is not queued.
 async function supersedeAndCreate(tx: Prisma.TransactionClient, input: EnqueueInput): Promise<ReviewJob> {
   await tx.reviewJob.updateMany({
@@ -75,6 +104,7 @@ async function supersedeAndCreate(tx: Prisma.TransactionClient, input: EnqueueIn
       repositoryId: input.repositoryId,
       number: input.number,
       status: "queued",
+      trial: false,
     },
     data: { status: "superseded", finishedAt: new Date() },
   });
@@ -110,6 +140,8 @@ export async function enqueueFromWebhook(input: EnqueueInput): Promise<WebhookEn
         // A skipped job does not count: a draft marked ready for review keeps its
         // head, and must still be reviewed.
         status: { notIn: ["superseded", "skipped"] },
+        // A trial reviewed the head for its draft only, never for the change.
+        trial: false,
         // Nor does one cancelled only because reviews were off or the change
         // closed: that head was never reviewed, and turning the repository back
         // on or reopening the change on the same head should pick it up.
@@ -374,6 +406,8 @@ export async function claimState(id: string, attempts: number): Promise<"owned" 
       number: job.number,
       createdAt: { gt: job.createdAt },
       startedAt: { not: null },
+      // A trial publishes nothing, so it never overtakes a review.
+      trial: false,
     },
     select: { id: true },
   });
@@ -416,7 +450,7 @@ export async function recoverStale(
     recovered += await prisma.$transaction(async (tx) => {
       await lockEnqueue(tx, job.repositoryId, job.number);
       const newer = await tx.reviewJob.findFirst({
-        where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt } },
+        where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
         select: { id: true },
       });
       // Still stale: a heartbeat that landed since means the worker is alive.
@@ -466,7 +500,7 @@ export async function requeueInterrupted(jobs: { id: string; attempts: number }[
         if (!job) return 0;
         await lockEnqueue(tx, job.repositoryId, job.number);
         const newer = await tx.reviewJob.findFirst({
-          where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt } },
+          where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
           select: { id: true },
         });
         const leaseExpiresAt = new Date(Date.now() + HANDBACK_LEASE_MS);

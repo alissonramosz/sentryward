@@ -68,6 +68,8 @@ export function RepoConfigForm(props: {
     apiKeys.data?.keys.filter((key) => key.stored).map((key) => key.provider),
     patternErrors,
     global.data?.config.rules,
+    "global",
+    global.data?.config.reviewers,
   )
   const valid = Object.keys(errors).length === 0
 
@@ -83,9 +85,10 @@ export function RepoConfigForm(props: {
       setRevision(saved.repo.settingsRevision)
       toast.success("Settings saved")
     } catch (err) {
-      // The server checks rules against the global config as saved now, which
-      // may have changed since this page loaded.
-      const rulesError = err instanceof ApiError ? err.fieldErrors?.rules?.[0] : undefined
+      // The server checks rules and custom reviewers against the global config
+      // as saved now, which may have changed since this page loaded.
+      const fields = err instanceof ApiError ? err.fieldErrors : undefined
+      const rulesError = fields?.rules?.[0] ?? fields?.reviewers?.[0]
       toast.error(rulesError ?? (err instanceof Error ? err.message : "Could not save settings"))
     }
   }

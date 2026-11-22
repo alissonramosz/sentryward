@@ -3,7 +3,7 @@ import type { ForgeConnection, IgnoreReason, ReviewJob } from "../generated/pris
 import { prisma } from "../lib/prisma.ts";
 import { skipReason, walkthroughEnabled } from "../review/config/filters.ts";
 import { loadDashboardConfigs, loadReviewConfig } from "../review/config/load.ts";
-import type { Config } from "../review/config/schema.ts";
+import { customReviewerSchema, type Config } from "../review/config/schema.ts";
 import type { ChangeSet, RejectedFinding, ToolAnnotation } from "../review/core/models.ts";
 import { priceUsage } from "../review/core/pricing/pricing.ts";
 import type { ContextSource } from "../review/context/gather.ts";
@@ -156,6 +156,23 @@ function connectionRefused(connection: ForgeConnection, deps: RunJobDeps): Promi
   return (deps.credentialsRefused ?? credentialsRefused)(connection);
 }
 
+export const TRIAL_WARNING = "Trial run: nothing was posted to the change, and its findings are not tracked";
+
+// A trial runs the change's resolved config with its draft reviewer added, on
+// even if the draft is switched off. A saved reviewer with the same id is the
+// one being edited, so the draft replaces it rather than running beside it.
+// The draft was validated on its own when the trial was queued; the combined
+// limits are not applied, since nothing is saved.
+export function withTrialReviewer(config: Config, job: Pick<ReviewJob, "trial" | "trialReviewer">): Config {
+  if (!job.trial) return config;
+  const draft = customReviewerSchema.safeParse(job.trialReviewer);
+  if (!draft.success) throw new Error("The trial's reviewer is no longer valid; start a new trial from the settings");
+  return {
+    ...config,
+    reviewers: [...config.reviewers.filter((reviewer) => reviewer.id !== draft.data.id), { ...draft.data, enabled: true }],
+  };
+}
+
 // Loads everything a review needs, runs it, publishes it and stores the
 // result. Anything thrown before the review starts (the repository vanished,
 // the forge is down, no model key) fails the job through the worker, and
@@ -254,7 +271,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     await recordTitle(job.id, changeSet.title, changeSet.authorId);
     loaded = await loadConfig();
   }
-  const { config } = loaded;
+  const config = withTrialReviewer(loaded.config, job);
   const skip = skipReason(job, config, changeSet);
   if (skip) {
     await complete(job.id, job.attempts, {
@@ -270,7 +287,11 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
 
   progress.plan(reviewSteps(config));
   progress.set({ stage: "preparing" });
-  const walkthrough = walkthroughEnabled(job.trigger, config, changeSet.isDraft);
+  // A trial is read for its reviewer's findings, so it skips the walkthrough
+  // rather than pay for a summary nobody will see posted.
+  const walkthrough = !job.trial && walkthroughEnabled(job.trigger, config, changeSet.isDraft);
+  // A trial posts nothing: no progress note, comments or commit status.
+  const publishing = !job.trial && publishes(config);
   // Only the models this review will call are checked, so a walkthrough or
   // verify model left set while that pass is off does not fail the job.
   const primary = [modelChain(config.llm, "review")[0]];
@@ -397,7 +418,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     return;
   }
 
-  if (publishes(config)) {
+  if (publishing) {
     // Best effort: a review must not fail because its progress note did.
     if (config.output.postSummary) {
       // Whether this review will have findings is not known yet, so under
@@ -530,22 +551,28 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
   result = { ...result, usage: priceUsage(result.usage, priceOverrides) };
   // Nothing is published for a review cancelled or a change no longer open.
   if (await watch.closedNow()) {
-    await cancel(publishes(config));
+    await cancel(publishing);
     return;
+  }
+  if (job.trial) {
+    result = { ...result, warnings: [...result.warnings, TRIAL_WARNING] };
   }
 
   // What became of the earlier findings goes into the result itself, so the
-  // summary comment and any later re-render of it show the same thing.
-  const findings = await prisma.finding.findMany({
-    where: { repositoryId: repo.id, number: job.number },
-    select: KNOWN_FINDING,
-  });
-  const lifecycle = findingLifecycle(findings, result);
+  // summary comment and any later re-render of it show the same thing. A
+  // trial's findings are never synced, so it has no lifecycle to tell.
+  const findings = job.trial
+    ? []
+    : await prisma.finding.findMany({
+        where: { repositoryId: repo.id, number: job.number },
+        select: KNOWN_FINDING,
+      });
+  const lifecycle = job.trial ? undefined : findingLifecycle(findings, result);
   if (lifecycle) result = { ...result, lifecycle };
 
   let publication = null;
   let threadOutcome: ThreadOutcome | null = null;
-  if (publishes(config)) {
+  if (publishing) {
     const already = await prisma.postedFinding.findMany({
       where: { repositoryId: repo.id, number: job.number },
       select: { fingerprint: true },
@@ -612,9 +639,10 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     headSha: ref.headSha,
     baseSha: ref.baseSha,
   });
-  // A run superseded or cancelled meanwhile no longer speaks for the change.
-  // The review itself is stored by now, so a failed sync must not fail the job.
-  if (stored) {
+  // A run superseded or cancelled meanwhile no longer speaks for the change,
+  // and a trial never does. The review itself is stored by now, so a failed
+  // sync must not fail the job.
+  if (stored && !job.trial) {
     await syncFindings({
       repositoryId: repo.id,
       number: job.number,

@@ -1,4 +1,4 @@
-import type { ConfigOverride, ConfigSchema, EffectiveConfig, Rule } from "./api"
+import type { ConfigOverride, ConfigSchema, CustomReviewer, EffectiveConfig, Rule } from "./api"
 
 export const INHERIT = "__inherit"
 
@@ -172,6 +172,39 @@ export const MAX_RULE_PATTERN = 300
 const MAX_RULE_EXAMPLE = 2000
 const MAX_RULES_CHARS = 16_000
 
+// One custom reviewer as the form edits it: strings, "" for unset.
+export interface ReviewerRow {
+  id: string
+  name: string
+  instructions: string
+  // One glob per line.
+  paths: string
+  severityFloor: string
+  maxComments: string
+  enabled: boolean
+}
+
+export type ReviewerField = Exclude<keyof ReviewerRow, "enabled">
+
+export const EMPTY_REVIEWER: ReviewerRow = {
+  id: "",
+  name: "",
+  instructions: "",
+  paths: "",
+  severityFloor: "",
+  maxComments: "",
+  enabled: true,
+}
+
+// Mirror customReviewerSchema in server/src/review/config/schema.ts.
+export const MAX_REVIEWERS = 8
+const MAX_REVIEWER_NAME = 60
+const MAX_REVIEWER_INSTRUCTIONS = 4000
+const MAX_REVIEWER_CHARS = 12_000
+const MAX_REVIEWER_COMMENTS = 50
+// The ids deep review already tags findings with.
+const RESERVED_REVIEWER_IDS = new Set(["general", "naming", "invariants", "boundaries", "contracts", "tests", "leaks", "consistency"])
+
 export interface FormState {
   profile: string
   model: string
@@ -199,6 +232,8 @@ export interface FormState {
   languageInstructions: LanguageRow[]
   // This layer's own rules, added to the inherited ones. Blank rows are not saved.
   rules: RuleRow[]
+  // This layer's own custom reviewers, added like rules. Blank rows are not saved.
+  reviewers: ReviewerRow[]
   // undefined inherits the value from the layers below.
   flags: Record<FlagName, boolean | undefined>
   // INHERIT inherits.
@@ -222,7 +257,8 @@ export type FormErrors = Partial<
     | "instructions"
     | "summaryInstructions"
     | "languageInstructions"
-    | "rules",
+    | "rules"
+    | "reviewers",
     string
   >
 >
@@ -285,6 +321,78 @@ export function toRule(row: RuleRow): Rule {
   return rule
 }
 
+const isBlankReviewer = (row: ReviewerRow) =>
+  !row.id.trim() && !row.name.trim() && !row.instructions.trim() && !row.paths.trim() && !row.severityFloor && !row.maxComments.trim()
+
+// An id from a name, for a new reviewer whose id was not typed: "API contracts" -> "api-contracts".
+export function reviewerIdFrom(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/-+$/, "")
+    .slice(0, 64)
+}
+
+export function toReviewerRow(reviewer: CustomReviewer): ReviewerRow {
+  return {
+    id: reviewer.id,
+    name: reviewer.name,
+    instructions: reviewer.instructions,
+    paths: (reviewer.paths ?? []).join("\n"),
+    severityFloor: reviewer.severityFloor ?? "",
+    maxComments: reviewer.maxComments === undefined ? "" : String(reviewer.maxComments),
+    enabled: reviewer.enabled !== false,
+  }
+}
+
+// Optional fields are left out when empty, and `enabled` only when off, as a
+// hand-written file would.
+export function toReviewer(row: ReviewerRow): CustomReviewer {
+  const paths = pathList(row.paths)
+  const reviewer: CustomReviewer = { id: row.id.trim(), name: row.name.trim(), instructions: row.instructions.trim() }
+  if (paths.length) reviewer.paths = paths
+  if (row.severityFloor) reviewer.severityFloor = row.severityFloor
+  if (row.maxComments.trim()) reviewer.maxComments = Number(row.maxComments.trim())
+  if (!row.enabled) reviewer.enabled = false
+  return reviewer
+}
+
+// Each reviewer row's problems, by field.
+export function reviewerRowErrors(rows: ReviewerRow[]): Partial<Record<ReviewerField, string>>[] {
+  const ids = rows.map((row) => row.id.trim())
+  return rows.map((row, index) => {
+    const errors: Partial<Record<ReviewerField, string>> = {}
+    if (isBlankReviewer(row)) return errors
+    const id = ids[index]
+    if (!id) errors.id = "Enter an id"
+    else if (!RULE_ID_PATTERN.test(id))
+      errors.id = "Use lowercase letters, digits, dots, dashes and underscores, e.g. api-contracts"
+    else if (RESERVED_REVIEWER_IDS.has(id)) errors.id = "This id is used by a built-in reviewer; choose another"
+    else if (ids.indexOf(id) !== index) errors.id = `Duplicate reviewer id ${id}`
+    const name = row.name.trim()
+    if (!name) errors.name = "Enter a name"
+    else if (name.length > MAX_REVIEWER_NAME) errors.name = `At most ${MAX_REVIEWER_NAME} characters`
+    const instructions = row.instructions.trim()
+    if (!instructions) errors.instructions = "Say what this reviewer looks for"
+    else if (instructions.length > MAX_REVIEWER_INSTRUCTIONS) errors.instructions = `At most ${MAX_REVIEWER_INSTRUCTIONS} characters`
+    if (pathList(row.paths).length > MAX_RULE_PATHS) errors.paths = `At most ${MAX_RULE_PATHS} paths`
+    const max = row.maxComments.trim()
+    if (max && !(Number.isInteger(Number(max)) && Number(max) >= 1 && Number(max) <= MAX_REVIEWER_COMMENTS))
+      errors.maxComments = `Enter a whole number between 1 and ${MAX_REVIEWER_COMMENTS}`
+    return errors
+  })
+}
+
+// Whether a row is complete enough to try on a change.
+export function reviewerRowValid(row: ReviewerRow): boolean {
+  return !isBlankReviewer(row) && Object.keys(reviewerRowErrors([row])[0]!).length === 0
+}
+
+function reviewerChars(reviewers: CustomReviewer[]): number {
+  return reviewers.reduce((sum, r) => sum + r.name.length + r.instructions.length + (r.paths?.join(", ").length ?? 0), 0)
+}
+
 function languageMap(rows: LanguageRow[]): Record<string, string> {
   const out: Record<string, string> = {}
   for (const row of rows) {
@@ -338,6 +446,7 @@ export function toForm(settings: ConfigOverride): FormState {
       text,
     })),
     rules: (settings.rules ?? []).map(toRuleRow),
+    reviewers: (settings.reviewers ?? []).map(toReviewerRow),
     flags,
   }
 }
@@ -361,6 +470,8 @@ export function toSettings(base: ConfigOverride, form: FormState): ConfigOverrid
   setOrDelete(next, "languageInstructions", Object.keys(languages).length ? languages : undefined)
   const rules = form.rules.filter((row) => !isBlankRule(row)).map(toRule)
   setOrDelete(next, "rules", rules.length ? rules : undefined)
+  const reviewers = form.reviewers.filter((row) => !isBlankReviewer(row)).map(toReviewer)
+  setOrDelete(next, "reviewers", reviewers.length ? reviewers : undefined)
 
   const fallbackModels = modelList(form.fallbackModels)
   const fields: Record<string, [string, unknown][]> = {
@@ -475,6 +586,8 @@ export function validateForm(
   // inherits the global config's, a folder the repository settings' (which
   // already include the global rules).
   inheritedFrom: "global" | "repoSettings" = "global",
+  // The custom reviewers of the layers below, combined with these like rules.
+  inheritedReviewers: CustomReviewer[] = [],
 ): FormErrors {
   const errors: FormErrors = {}
   for (const spec of NUMBERS) {
@@ -542,6 +655,20 @@ export function validateForm(
   else if (combined.length > MAX_RULES) errors.rules = `At most ${MAX_RULES} rules${withGlobal}`
   else if (modelRuleChars(combined) > MAX_RULES_CHARS)
     errors.rules = `Rules without a pattern may hold at most ${MAX_RULES_CHARS} characters in total (ids, paths, descriptions and examples)${withGlobal}`
+
+  const reviewers = form.reviewers.filter((row) => !isBlankReviewer(row)).map(toReviewer)
+  const allReviewers = [...inheritedReviewers, ...reviewers]
+  const inheritedReviewerIds = new Set(inheritedReviewers.map((reviewer) => reviewer.id))
+  const reviewerClash = reviewers.find((reviewer) => inheritedReviewerIds.has(reviewer.id))
+  const withInherited = inheritedReviewers.length
+    ? `, together with the ${inheritedReviewers.length} ${inheritedFrom === "global" ? "global" : "inherited"} reviewers`
+    : ""
+  if (reviewerRowErrors(form.reviewers).some((row) => Object.keys(row).length > 0))
+    errors.reviewers = "Fix the reviewers marked below"
+  else if (reviewerClash) errors.reviewers = `Custom reviewer ${reviewerClash.id} is already set in the ${fromLabel}, which wins`
+  else if (allReviewers.length > MAX_REVIEWERS) errors.reviewers = `At most ${MAX_REVIEWERS} custom reviewers${withInherited}`
+  else if (reviewerChars(allReviewers) > MAX_REVIEWER_CHARS)
+    errors.reviewers = `Custom reviewers may hold at most ${MAX_REVIEWER_CHARS} characters in total (names, instructions and paths)${withInherited}`
   return errors
 }
 

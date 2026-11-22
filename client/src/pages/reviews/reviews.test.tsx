@@ -773,6 +773,32 @@ describe("Review detail page", () => {
     expect(await screen.findByText("Deep: tests")).toBeInTheDocument()
   })
 
+  it("names a trial's custom reviewer apart from the specialists, and marks the run as a trial", async () => {
+    const result = {
+      ...detail.result!,
+      findings: [{ ...detail.result!.findings[0]!, reviewer: "api-contracts", reviewerName: "API contracts" }],
+      usage: [...detail.result!.usage, { purpose: "review", model: "m", inputTokens: 1, outputTokens: 1, latencyMs: 1, lens: "api-contracts" }],
+    }
+    mockApi({
+      [`GET /api/reviews/${detail.id}`]: {
+        review: {
+          ...detail,
+          trial: true,
+          result,
+          resolvedConfig: { config: { reviewers: [{ id: "api-contracts", name: "API contracts" }] } },
+        },
+      },
+      [`GET /api/reviews/${detail.id}/change`]: () => jsonResponse(502, { message: "GitHub request failed" }),
+    })
+    renderWithProviders(<App />, { route: `/reviews/${detail.id}` })
+
+    const sidebar = await screen.findByRole("complementary", { name: "Review details" })
+    expect(within(sidebar).getByText("Reviewers", { selector: "dt" }).closest("div")).toHaveTextContent("API contracts")
+    expect(within(sidebar).queryByText("Depth", { selector: "dt" })).not.toBeInTheDocument()
+    expect(within(sidebar).getByText("Trial")).toBeInTheDocument()
+    expect(await screen.findByText("Reviewer: API contracts")).toBeInTheDocument()
+  })
+
   it("shows the focus the review was asked for", async () => {
     mockApi({
       [`GET /api/reviews/${detail.id}`]: { review: { ...detail, focus: "the auth logic" } },

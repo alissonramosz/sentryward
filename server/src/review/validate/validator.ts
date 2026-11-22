@@ -5,9 +5,10 @@ import { hunkAt, isAddedLine, newFileLines, type ChangedFile, type ChangeSet, ty
 import { atLeast, severityRank } from "../core/severity.ts";
 import type { ModelFinding } from "../llm/schemas.ts";
 import { DEFAULT_RULE_CATEGORY, modelRuleFor, ruleFloor, ruleMinConfidence } from "../rules.ts";
+import { lensCovers } from "../llm/lenses.ts";
 
 // A model finding plus the model of the pass that produced it, and the deep
-// review specialist that pass ran as, if any.
+// review specialist or custom reviewer that pass ran as, if any.
 export type TaggedFinding = ModelFinding & { model?: string; reviewer?: string };
 
 // How far a reported line may be from a changed line and still be snapped to
@@ -35,7 +36,10 @@ export type DropReason =
   | "rule_mismatch"
   // The repository at the head contradicted the fact the finding rested on
   // (claims.ts): the path exists, or the symbol or file is referenced.
-  | "claim_refuted";
+  | "claim_refuted"
+  // A custom reviewer reported on a file its paths leave out: the pass held
+  // other files too, and only those it covers were its to review.
+  | "reviewer_mismatch";
 
 export interface ValidationResult {
   findings: Finding[];
@@ -186,6 +190,11 @@ export function validateFindings(
       drop("rule_mismatch");
       continue;
     }
+    const custom = candidate.reviewer ? config.reviewers.find((reviewer) => reviewer.id === candidate.reviewer) : undefined;
+    if (custom && !lensCovers(custom, file.path)) {
+      drop("reviewer_mismatch");
+      continue;
+    }
     const category = rule ? (rule.category ?? DEFAULT_RULE_CATEGORY) : candidate.category;
     if (!rule && !candidate.reviewer && !categories.has(candidate.category)) {
       drop("category");
@@ -218,7 +227,9 @@ export function validateFindings(
       kind = "verification_needed";
       demoted += 1;
     }
-    if (!atLeast(severity, ruleFloor(config, rule?.id))) {
+    // A custom reviewer's own floor, when it sets one, holds its findings in
+    // place of review.severityFloor.
+    if (!atLeast(severity, custom?.severityFloor ?? ruleFloor(config, rule?.id))) {
       drop("below_floor");
       continue;
     }
@@ -275,6 +286,7 @@ export function validateFindings(
       fingerprint: fingerprint({ file: file.path, category, kind, title }),
       ...(candidate.model ? { model: candidate.model } : {}),
       ...(candidate.reviewer ? { reviewer: candidate.reviewer } : {}),
+      ...(custom ? { reviewerName: custom.name } : {}),
       bucket: bucketFor({ file: file.path, startLine: start, kind }, changeSet),
     };
 
@@ -296,6 +308,24 @@ export function validateFindings(
 }
 
 // The first `max` of findings already sorted by compareFindings.
+// At most a custom reviewer's maxComments of its findings, the most severe
+// first; findings arrive sorted by compareFindings, so the first ones are kept.
+// Applied before the review-wide cap, so one chatty reviewer cannot use up
+// the slots the general pass needs.
+export function capPerReviewer(findings: Finding[], config: Config): { findings: Finding[]; overLimit: number } {
+  const limits = new Map(config.reviewers.flatMap((reviewer) => (reviewer.maxComments ? [[reviewer.id, reviewer.maxComments] as const] : [])));
+  if (!limits.size) return { findings, overLimit: 0 };
+  const counts = new Map<string, number>();
+  const kept = findings.filter((finding) => {
+    const limit = finding.reviewer !== undefined ? limits.get(finding.reviewer) : undefined;
+    if (limit === undefined) return true;
+    const count = (counts.get(finding.reviewer!) ?? 0) + 1;
+    counts.set(finding.reviewer!, count);
+    return count <= limit;
+  });
+  return { findings: kept, overLimit: findings.length - kept.length };
+}
+
 export function capFindings(findings: Finding[], max: number): { findings: Finding[]; overLimit: number } {
   return { findings: findings.slice(0, max), overLimit: Math.max(0, findings.length - max) };
 }

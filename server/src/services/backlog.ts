@@ -193,6 +193,8 @@ async function latestResult(tx: Tx, repositoryId: string, number: number, jobId?
       number,
       status: { in: ["completed", "partial"] },
       resultExpiredAt: null,
+      // A trial does not speak for what merged.
+      trial: false,
       ...(jobId ? { id: jobId } : {}),
     },
     orderBy: { createdAt: "desc" },

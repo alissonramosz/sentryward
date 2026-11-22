@@ -12,10 +12,12 @@ import {
   claimNext as claimNextJob,
   DISABLED_REASON,
   enqueue,
+  enqueueFromWebhook,
+  enqueueTrial,
   fail,
   recordProgress,
 } from "../src/worker/queue.ts";
-import { runJob, skipReason, walkthroughEnabled, type RunJobDeps } from "../src/worker/runJob.ts";
+import { runJob, skipReason, TRIAL_WARNING, walkthroughEnabled, type RunJobDeps } from "../src/worker/runJob.ts";
 import { reviewSteps } from "../src/worker/progress.ts";
 import { DEFAULT_CONFIG } from "../src/review/config/schema.ts";
 import { fingerprint } from "../src/review/core/fingerprint.ts";
@@ -1866,5 +1868,60 @@ describe("privacy policy", () => {
     const row = (await auditRows(job.id)).find((r) => r.purpose === "review");
     expect(row).toMatchObject({ purpose: "review", outcome: "failed", errorKind: "error", inputTokens: 0 });
     expect(JSON.stringify(row)).not.toContain("secret");
+  });
+});
+
+describe("trial runs", () => {
+  const draft = { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change without a version bump." };
+
+  it("reviews with the draft added, stores the result and posts and tracks nothing", async () => {
+    await enqueueTrial({ repositoryId, number: 42, headSha: "oldhead", reviewer: draft });
+    const job = (await claimNext())!;
+    expect(job.trial).toBe(true);
+    const { runDeps, model, published } = deps(
+      {},
+      {
+        code_review: (request: { system?: string }) =>
+          request.system?.includes('Team-defined reviewer "API contracts"')
+            ? { findings: [modelFinding({ title: "The response drops a field" })] }
+            : { findings: [] },
+        walkthrough: WALKTHROUGH,
+      },
+    );
+
+    await runJob(job, runDeps);
+
+    const stored = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(stored.status).toBe("completed");
+    const result = stored.result as ReviewResult;
+    expect(result.findings.map((f) => [f.title, f.reviewerName])).toEqual([["The response drops a field", "API contracts"]]);
+    expect(result.warnings).toContain(TRIAL_WARNING);
+    expect(stored.resolvedConfig).toMatchObject({ config: { reviewers: [{ id: "api-contracts", enabled: true }] } });
+    // The general pass and the draft's, and no walkthrough.
+    expect(model.requests.filter((request) => request.schemaName === "code_review")).toHaveLength(2);
+    expect(model.requests.some((request) => request.schemaName === "walkthrough")).toBe(false);
+    expect(published).toEqual({ inline: [], summaries: [], statuses: [], descriptions: [], labels: [], threads: [] });
+    expect(await prisma.finding.count({ where: { repositoryId, number: 42 } })).toBe(0);
+    expect(stored.publication).toBeNull();
+  });
+
+  it("neither supersedes nor is superseded by the change's reviews, nor counts as reviewing the head", async () => {
+    const review = await enqueue({ repositoryId, number: 42, headSha: "h1", trigger: "manual" });
+    const trial = await enqueueTrial({ repositoryId, number: 42, headSha: "h1", reviewer: draft });
+    // A manual request is not answered by the queued trial, and leaves it queued.
+    const again = await enqueue({ repositoryId, number: 42, headSha: "h1", trigger: "manual" });
+    expect(again.id).toBe(review.id);
+    const pushed = await enqueue({ repositoryId, number: 42, headSha: "h2", trigger: "manual" });
+    const statuses = await prisma.reviewJob.findMany({ where: { id: { in: [review.id, trial.id, pushed.id] } } });
+    expect(Object.fromEntries(statuses.map((j) => [j.id, j.status]))).toEqual({
+      [review.id]: "superseded",
+      [trial.id]: "queued",
+      [pushed.id]: "queued",
+    });
+    // A webhook for a head only a trial has seen is still reviewed.
+    await prisma.reviewJob.updateMany({ where: { id: { not: trial.id } }, data: { status: "cancelled" } });
+    await prisma.reviewJob.create({ data: { repositoryId, number: 7, headSha: "h7", trigger: "manual", trial: true, status: "completed" } });
+    const hook = await enqueueFromWebhook({ repositoryId, number: 7, headSha: "h7", trigger: "webhook", event: "open" });
+    expect(hook.queued).toBe(true);
   });
 });

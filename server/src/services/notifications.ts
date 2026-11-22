@@ -308,6 +308,7 @@ export async function previousVerdict(
       id: { not: job.id },
       status: { in: ["completed", "partial"] },
       finishedAt: { lt: job.finishedAt ?? job.createdAt },
+      trial: false,
     },
     orderBy: [{ finishedAt: "desc" }, { createdAt: "desc" }],
     select: { verdict: true },
@@ -1701,7 +1702,8 @@ export async function notifyJob(jobId: string): Promise<void> {
   try {
     await prisma.$transaction(async (tx) => {
       const { count } = await tx.reviewJob.updateMany({
-        where: { id: jobId, notifiedAt: null, status: { in: NOTIFIED_STATUSES } },
+        // A trial is only for whoever started it, on the dashboard.
+        where: { id: jobId, notifiedAt: null, status: { in: NOTIFIED_STATUSES }, trial: false },
         data: { notifiedAt: new Date() },
       });
       if (count === 0) return;
@@ -1800,6 +1802,7 @@ export async function queueMissedNotifications(now = new Date()): Promise<number
     where: {
       status: { in: NOTIFIED_STATUSES },
       notifiedAt: null,
+      trial: false,
       finishedAt: {
         gte: new Date(now.getTime() - MISSED_NOTIFY_LOOKBACK_MS),
         lte: new Date(now.getTime() - MISSED_NOTIFY_GRACE_MS),

@@ -40,6 +40,7 @@ const DROP_REASON_TEXT: Record<DropReason, string> = {
   refuted: "Refuted by verification",
   rule_mismatch: "Named a rule that does not apply",
   claim_refuted: "The repository contradicted its claim",
+  reviewer_mismatch: "A custom reviewer reported on a file outside its paths",
 }
 
 // A reason added on the server before the client knows it still reads as text.
@@ -164,9 +165,13 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
     review.startedAt && review.finishedAt
       ? formatDuration(new Date(review.finishedAt).getTime() - new Date(review.startedAt).getTime())
       : null
-  // The specialists that ran, read off their calls: settings can turn deep
-  // review on without the run asking for it.
-  const specialists = [...new Set((result?.usage ?? []).flatMap((call) => (call.lens ? [call.lens] : [])))]
+  // The extra passes that ran, read off their calls: settings can turn deep
+  // review on without the run asking for it. Custom reviewers are told apart
+  // from the specialists by the run's own config.
+  const lensIds = [...new Set((result?.usage ?? []).flatMap((call) => (call.lens ? [call.lens] : [])))]
+  const customNames = new Map((review.resolvedConfig?.config?.reviewers ?? []).map((reviewer) => [reviewer.id, reviewer.name]))
+  const specialists = lensIds.filter((id) => !customNames.has(id))
+  const customReviewers = lensIds.filter((id) => customNames.has(id)).map((id) => customNames.get(id)!)
   return (
     <SideCard title="Change">
       <dl className="flex flex-col gap-1.5">
@@ -205,6 +210,11 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
           <span className="inline-flex items-center gap-1.5">
             <TriggerIcon trigger={review.trigger} />
             {TRIGGER_LABEL[review.trigger]}
+            {review.trial && (
+              <Badge variant="outline" title="A custom reviewer tried from the settings; nothing was posted to the change">
+                Trial
+              </Badge>
+            )}
           </span>
         </Row>
         {review.resolvedConfig?.directory && (
@@ -220,6 +230,11 @@ function ChangeCard({ review, result }: { review: ReviewDetail; result: ReviewRe
               Deep review
               {specialists.length > 0 && ` (${specialists.length} specialist${specialists.length === 1 ? "" : "s"})`}
             </span>
+          </Row>
+        )}
+        {customReviewers.length > 0 && (
+          <Row label="Reviewers">
+            <span title={customReviewers.join(", ")}>{customReviewers.join(", ")}</span>
           </Row>
         )}
         {review.focus && (

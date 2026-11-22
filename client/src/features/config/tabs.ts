@@ -31,7 +31,7 @@ export const CONFIG_TABS = [
     value: "guidance",
     label: "Guidance",
     icon: BookText,
-    description: "Project conventions, per-language guidance and team rules passed to the reviewer.",
+    description: "Project conventions, per-language guidance, team rules and custom reviewers.",
   },
 ] as const
 

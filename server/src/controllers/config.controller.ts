@@ -71,9 +71,11 @@ export async function loadRuleRepositories(db: PrismaClient | Prisma.Transaction
     where: { connection: { workspaceId }, followGlobal: false },
     select: { fullPath: true, settings: true, directories: true },
   });
+  // Custom reviewers combine across layers like rules, so they can be left
+  // out the same way.
   const hasRules = (settings: unknown) => {
-    const rules = (settings as { rules?: unknown[] } | null)?.rules;
-    return Array.isArray(rules) && rules.length > 0;
+    const own = settings as { rules?: unknown[]; reviewers?: unknown[] } | null;
+    return (Array.isArray(own?.rules) && own.rules.length > 0) || (Array.isArray(own?.reviewers) && own.reviewers.length > 0);
   };
   return repos.filter((repo) => {
     const directories = Array.isArray(repo.directories) ? (repo.directories as { settings?: unknown }[]) : [];

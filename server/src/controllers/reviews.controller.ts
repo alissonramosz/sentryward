@@ -15,10 +15,13 @@ import { toJson } from "../review/render/json.ts";
 import { toMarkdown, walkthroughOptions } from "../review/render/markdown.ts";
 import { adapterForConnection, toHttpError } from "../services/forge.ts";
 import { errorKind } from "../services/reviewErrors.ts";
+import { requireRole } from "../services/workspaces.ts";
 import { digestTotals } from "../services/usage.ts";
-import { cancelJob, enqueue } from "../worker/queue.ts";
+import { cancelJob, enqueue, enqueueTrial } from "../worker/queue.ts";
+import { customReviewerSchema, type CustomReviewer } from "../review/config/schema.ts";
 import {
   createReviewByRepoSchema,
+  createTrialSchema,
   createReviewSchema,
   listReviewsQuerySchema,
   reviewIdParamSchema,
@@ -38,6 +41,7 @@ const listFields = {
   createdAt: true,
   startedAt: true,
   finishedAt: true,
+  trial: true,
   repository: { select: { id: true, provider: true, host: true, fullPath: true } },
 } as const;
 
@@ -87,21 +91,26 @@ export async function createReview(req: Request, res: Response) {
   }
 
   const { url, focus, deep } = createReviewSchema.parse(req.body);
+  const { repo, number } = await changeForUrl(req.workspaceId!, url);
+  await queueManual(res, repo, number, { focus: focus ?? null, deep: deep ?? false });
+}
+
+// The workspace's repository and change a pull or merge request URL names.
+async function changeForUrl(workspaceId: string, url: string): Promise<{ repo: RepoWithConnection; number: number }> {
   const parsed = parseChangeUrl(url);
   if (!parsed) {
     throw new HttpError(400, "Not a pull or merge request URL");
   }
-
   // Forge paths are case-insensitive; compare the way the forge would.
   const candidates = await prisma.repository.findMany({
-    where: { provider: parsed.provider, host: parsed.host, connection: { workspaceId: req.workspaceId } },
+    where: { provider: parsed.provider, host: parsed.host, connection: { workspaceId } },
     include: { connection: true },
   });
   const repo = candidates.find((r) => r.fullPath.toLowerCase() === parsed.project.toLowerCase());
   if (!repo) {
     throw new HttpError(404, `${parsed.project} is not connected; enable it under Repositories first`);
   }
-  await queueManual(res, repo, parsed.number, { focus: focus ?? null, deep: deep ?? false });
+  return { repo, number: parsed.number };
 }
 
 type ListQuery = ReturnType<typeof listReviewsQuerySchema.parse>;
@@ -144,7 +153,10 @@ export async function listReviews(req: Request, res: Response) {
   const { page, limit } = query;
   const where = listWhere(req.workspaceId!, query);
   if (query.view === "changes") {
-    res.json({ ...(await listChanges(where, changesTotal(req.workspaceId!, query), page, limit)), page, limit });
+    // A trial never speaks for its change, so it is not a change's latest run;
+    // trials are listed with every run, and linked from where they started.
+    const changes = { ...where, trial: false };
+    res.json({ ...(await listChanges(changes, changesTotal(req.workspaceId!, query), page, limit)), page, limit });
     return;
   }
   // Offset paging so the dashboard can show page numbers and a total; the id
@@ -210,7 +222,7 @@ async function listChanges(
 // stay in step with listWhere, or the total drifts from the rows shown.
 function changesTotal(workspaceId: string, query: ListQuery) {
   const { repoId, status, verdict, trigger, number, q, includeSuperseded } = query;
-  const conditions = [Prisma.sql`c.workspace_id = ${workspaceId}::uuid`];
+  const conditions = [Prisma.sql`c.workspace_id = ${workspaceId}::uuid`, Prisma.sql`j.trial = false`];
   if (repoId) conditions.push(Prisma.sql`j.repository_id = ${repoId}::uuid`);
   if (verdict) conditions.push(Prisma.sql`j.verdict = ${verdict}::review_verdict`);
   if (trigger) conditions.push(Prisma.sql`j.trigger = ${trigger}::review_trigger`);
@@ -247,6 +259,8 @@ export async function getReviewStats(req: Request, res: Response) {
       ...(repoId ? { repositoryId: repoId } : {}),
       createdAt: { gte: since },
       status: { notIn: ["superseded", "skipped", "cancelled"] },
+      // Trials try a draft reviewer; their verdicts say nothing about the code.
+      trial: false,
     },
     // summary is a small digest column; result (large) is never loaded here.
     select: { status: true, verdict: true, startedAt: true, finishedAt: true, summary: true },
@@ -352,6 +366,7 @@ async function loadOwnedReview(workspaceId: string, id: string) {
       resolvedConfig: true,
       focus: true,
       deep: true,
+      trialReviewer: true,
       resultExpiredAt: true,
       progress: true,
     },
@@ -495,8 +510,57 @@ export async function rerunReview(req: Request, res: Response) {
   if (!existing) {
     throw new HttpError(404, "Review not found");
   }
+  // A re-run of a trial tries the same draft again.
+  if (existing.trial) {
+    // Held to the same role as starting one.
+    requireRole(req.workspaceRole!, "admin");
+    const reviewer = customReviewerSchema.safeParse(existing.trialReviewer);
+    if (!reviewer.success) throw new HttpError(409, "This trial's reviewer is no longer valid; start a new trial from the settings");
+    await queueTrial(res, existing.repository, existing.number, reviewer.data);
+    return;
+  }
   // A re-run asks the same question again, focus and depth included.
   await queueManual(res, existing.repository, existing.number, { focus: existing.focus, deep: existing.deep });
+}
+
+// Runs a draft custom reviewer on a change without publishing (ReviewJob.trial).
+// Settings editors only: a trial spends the workspace's model budget on a
+// reviewer nobody has saved.
+export async function createTrial(req: Request, res: Response) {
+  const body = createTrialSchema.parse(req.body);
+  if (body.url !== undefined) {
+    const { repo, number } = await changeForUrl(req.workspaceId!, body.url);
+    await queueTrial(res, repo, number, body.reviewer);
+    return;
+  }
+  const repo = await prisma.repository.findFirst({
+    where: { id: body.repoId!, connection: { workspaceId: req.workspaceId } },
+    include: { connection: true },
+  });
+  if (!repo) {
+    throw new HttpError(404, "Repository not found");
+  }
+  await queueTrial(res, repo, body.number!, body.reviewer);
+}
+
+async function queueTrial(res: Response, repo: RepoWithConnection, number: number, reviewer: CustomReviewer) {
+  if (!repo.enabled) {
+    throw new HttpError(409, `Reviews are turned off for ${repo.fullPath}`);
+  }
+  const head = await adapterForConnection(repo.connection)
+    .getChangeHead(repo.fullPath, number)
+    .catch((err: unknown) => {
+      throw toHttpError(err, repo.provider);
+    });
+  const job = await enqueueTrial({
+    repositoryId: repo.id,
+    number,
+    headSha: head.headSha,
+    // Always on for its own trial, whatever the draft's switch says.
+    reviewer: { ...reviewer, enabled: true },
+  });
+  const review = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id }, select: listFields });
+  res.status(202).json({ review });
 }
 
 export async function cancelReview(req: Request, res: Response) {

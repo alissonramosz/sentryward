@@ -73,6 +73,8 @@ export async function incrementFor({
       number: job.number,
       status: { in: ["completed", "partial"] },
       id: { not: job.id },
+      // A trial's findings were never synced, so it cannot be built on.
+      trial: false,
     },
     orderBy: { finishedAt: "desc" },
     select: { headSha: true, result: true, resolvedConfig: true },

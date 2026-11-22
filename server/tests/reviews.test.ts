@@ -10,7 +10,7 @@ import { toMarkdown } from "../src/review/render/markdown.ts";
 import { claimNext, recordTitle } from "../src/worker/queue.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { sampleResult } from "./helpers/result.ts";
-import { createTeam, createUser, inWorkspace } from "./helpers/users.ts";
+import { addMember, createTeam, createUser, inWorkspace } from "./helpers/users.ts";
 
 let cookie: string;
 let repoId: string;
@@ -948,5 +948,68 @@ describe("GET /api/reviews/:id/change", () => {
     const res = await request(app).get(`/api/reviews/${created.id}/change`).set("Cookie", other.cookie);
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /api/reviews/trial", () => {
+  const reviewer = { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change without a version bump." };
+
+  it("queues a trial at the change's head, kept out of the change view and the stats", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+    await completedJob();
+
+    const res = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ repoId, number: 7, reviewer });
+    expect(res.status).toBe(202);
+    expect(res.body.review).toMatchObject({ trial: true, headSha: "abc123" });
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: res.body.review.id } })).toMatchObject({
+      trial: true,
+      trialReviewer: reviewer,
+    });
+
+    const changes = await request(app).get("/api/reviews?view=changes").set("Cookie", cookie);
+    expect(changes.body.total).toBe(1);
+    expect(changes.body.reviews[0].trial).toBe(false);
+    const runs = await request(app).get("/api/reviews").set("Cookie", cookie);
+    expect(runs.body.total).toBe(2);
+
+    // A re-run tries the same draft again.
+    const rerun = await request(app).post(`/api/reviews/${res.body.review.id}/rerun`).set("Cookie", cookie);
+    expect(rerun.status).toBe(202);
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: rerun.body.review.id } })).toMatchObject({ trial: true, trialReviewer: reviewer });
+  });
+
+  it("names the change by its URL too, and asks for one when neither is given", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+    const byUrl = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ url: MR_URL, reviewer });
+    expect(byUrl.status).toBe(202);
+    expect(byUrl.body.review).toMatchObject({ trial: true, number: 7 });
+    const neither = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ reviewer });
+    expect(neither.status).toBe(400);
+    expect(neither.body.errors).toHaveProperty("url");
+  });
+
+  it("refuses a reviewer the settings would refuse", async () => {
+    const res = await request(app)
+      .post("/api/reviews/trial")
+      .set("Cookie", cookie)
+      .send({ repoId, number: 7, reviewer: { ...reviewer, id: "tests" } });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toHaveProperty("reviewer");
+  });
+
+  it("is for settings editors only", async () => {
+    const owner = await createUser("owner@example.com");
+    const team = await createTeam(owner.user.id);
+    const repo = await prisma.repository.findUniqueOrThrow({ where: { id: repoId } });
+    await prisma.forgeConnection.update({ where: { id: repo.connectionId }, data: { workspaceId: team.id } });
+    const me = await prisma.user.findFirstOrThrow({ where: { email: "dev@example.com" } });
+    await addMember(team.id, me.id, "member");
+
+    const res = await request(app)
+      .post("/api/reviews/trial")
+      .set("Cookie", cookie)
+      .set(...inWorkspace(team.id))
+      .send({ repoId, number: 7, reviewer });
+    expect(res.status).toBe(403);
   });
 });

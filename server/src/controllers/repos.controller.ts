@@ -292,7 +292,15 @@ export function requireRepoSettingsRules(
       .map(key),
   );
   const issues = after.filter((issue) => issue.directory === undefined || !before.has(key(issue)));
-  if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
+  if (issues.length) throw new HttpError(400, "Validation failed", combinedIssueErrors(issues));
+}
+
+// Field errors for refused rules and custom reviewers, each under its own
+// field so the form shows it next to the list at fault.
+function combinedIssueErrors(issues: { list: "rules" | "reviewers"; message: string }[]): Record<string, string[]> {
+  const errors: Record<string, string[]> = {};
+  for (const issue of issues) (errors[issue.list] ??= []).push(issue.message);
+  return errors;
 }
 
 // A chosen LLM connection must be one the workspace has stored.
@@ -339,7 +347,7 @@ async function changeDirectories(
         directories: parsed.data,
         followGlobal: row.followGlobal,
       }).filter((issue) => issue.directory === index);
-      if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
+      if (issues.length) throw new HttpError(400, "Validation failed", combinedIssueErrors(issues));
     }
     await tx.repository.update({ where: { id }, data: { directories: parsed.data } });
   });

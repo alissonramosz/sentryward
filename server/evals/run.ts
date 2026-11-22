@@ -97,8 +97,9 @@ function row(report: CaseReport): string {
   return [report.id.padEnd(32), ...cells.map((cell) => cell.padStart(7)), usd(report.costUsd).padStart(10)].join(" ");
 }
 
-// What each deep review specialist added: findings that matched an
-// expectation, false positives, and what its calls cost.
+// What each deep review specialist or custom reviewer (a case's
+// config.reviewers) added: findings that matched an expectation, false
+// positives, and what its calls cost.
 function printLenses(run: EvalRun) {
   const lenses = new Map<string, { hits: number; falsePositives: number; calls: number; costUsd: number | null }>();
   const entry = (lens: string) => {
@@ -119,7 +120,7 @@ function printLenses(run: EvalRun) {
     }
   }
   if (lenses.size === 0) return;
-  console.log(["specialist".padEnd(16), ..."hits fp calls".split(" ").map((h) => h.padStart(7)), "cost".padStart(10)].join(" "));
+  console.log(["reviewer".padEnd(16), ..."hits fp calls".split(" ").map((h) => h.padStart(7)), "cost".padStart(10)].join(" "));
   for (const [lens, found] of [...lenses].sort(([a], [b]) => a.localeCompare(b))) {
     console.log(
       [lens.padEnd(16), ...[found.hits, found.falsePositives, found.calls].map((n) => String(n).padStart(7)), usd(found.costUsd).padStart(10)].join(" "),

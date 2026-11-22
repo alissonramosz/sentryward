@@ -1,5 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api, ApiError, workspaceHeaders } from "@/lib/api"
+import type { CustomReviewer } from "@/features/config/api"
 import { isActive, type ChangeDetails, type ChangedFile, type JobStatus, type OpenChange, type ReviewDetail, type ReviewListItem, type ReviewStats, type Trigger, type Verdict } from "./types"
 
 // While anything is queued or running, poll; otherwise stay quiet.
@@ -169,6 +170,21 @@ export function useOpenChanges(repoId: string | undefined) {
     queryKey: ["repos", repoId, "changes"],
     queryFn: () => api<{ changes: OpenChange[] }>(`/repos/${repoId}/changes`),
     enabled: Boolean(repoId),
+  })
+}
+
+export interface StartTrialInput {
+  url: string
+  reviewer: CustomReviewer
+}
+
+// Runs a draft custom reviewer on a change without posting anything.
+export function useStartTrial() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: StartTrialInput) =>
+      api<{ review: ReviewListItem }>("/reviews/trial", { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reviews"] }),
   })
 }
 
