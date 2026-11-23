@@ -197,11 +197,11 @@ describe("resolveConfig", () => {
     });
 
     it("report clashes and limits by layer", () => {
-      const { ruleIssues } = resolveConfig({
+      const { combinedIssues } = resolveConfig({
         global: { rules: [rule("shared")] },
         repoSettings: { rules: [rule("shared")] },
       });
-      expect(ruleIssues).toEqual([expect.objectContaining({ layer: "repoSettings", kind: "clash" })]);
+      expect(combinedIssues).toEqual([expect.objectContaining({ layer: "repoSettings", kind: "clash" })]);
     });
 
     it("hold dashboard rules to the dashboard's thresholds, which a file can only tighten", () => {

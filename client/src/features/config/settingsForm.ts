@@ -174,25 +174,29 @@ const MAX_RULES_CHARS = 16_000
 
 // One custom reviewer as the form edits it: strings, "" for unset.
 export interface ReviewerRow {
+  // Which row this is while the form is open, so a row keeps its own state
+  // (a trial's URL) when one above it is removed or its id is edited. Never saved.
+  key: string
   id: string
   name: string
   instructions: string
   // One glob per line.
   paths: string
   severityFloor: string
-  maxComments: string
+  maxFindings: string
   enabled: boolean
 }
 
-export type ReviewerField = Exclude<keyof ReviewerRow, "enabled">
+export type ReviewerField = Exclude<keyof ReviewerRow, "key" | "enabled">
 
 export const EMPTY_REVIEWER: ReviewerRow = {
+  key: "",
   id: "",
   name: "",
   instructions: "",
   paths: "",
   severityFloor: "",
-  maxComments: "",
+  maxFindings: "",
   enabled: true,
 }
 
@@ -201,7 +205,7 @@ export const MAX_REVIEWERS = 8
 const MAX_REVIEWER_NAME = 60
 const MAX_REVIEWER_INSTRUCTIONS = 4000
 const MAX_REVIEWER_CHARS = 12_000
-const MAX_REVIEWER_COMMENTS = 50
+const MAX_REVIEWER_FINDINGS = 50
 // The ids deep review already tags findings with.
 const RESERVED_REVIEWER_IDS = new Set(["general", "naming", "invariants", "boundaries", "contracts", "tests", "leaks", "consistency"])
 
@@ -322,7 +326,7 @@ export function toRule(row: RuleRow): Rule {
 }
 
 const isBlankReviewer = (row: ReviewerRow) =>
-  !row.id.trim() && !row.name.trim() && !row.instructions.trim() && !row.paths.trim() && !row.severityFloor && !row.maxComments.trim()
+  !row.id.trim() && !row.name.trim() && !row.instructions.trim() && !row.paths.trim() && !row.severityFloor && !row.maxFindings.trim()
 
 // An id from a name, for a new reviewer whose id was not typed: "API contracts" -> "api-contracts".
 export function reviewerIdFrom(name: string): string {
@@ -334,14 +338,20 @@ export function reviewerIdFrom(name: string): string {
     .slice(0, 64)
 }
 
+let lastReviewerKey = 0
+const newReviewerKey = () => `reviewer-${++lastReviewerKey}`
+
+export const newReviewerRow = (): ReviewerRow => ({ ...EMPTY_REVIEWER, key: newReviewerKey() })
+
 export function toReviewerRow(reviewer: CustomReviewer): ReviewerRow {
   return {
+    key: newReviewerKey(),
     id: reviewer.id,
     name: reviewer.name,
     instructions: reviewer.instructions,
     paths: (reviewer.paths ?? []).join("\n"),
     severityFloor: reviewer.severityFloor ?? "",
-    maxComments: reviewer.maxComments === undefined ? "" : String(reviewer.maxComments),
+    maxFindings: reviewer.maxFindings === undefined ? "" : String(reviewer.maxFindings),
     enabled: reviewer.enabled !== false,
   }
 }
@@ -353,7 +363,7 @@ export function toReviewer(row: ReviewerRow): CustomReviewer {
   const reviewer: CustomReviewer = { id: row.id.trim(), name: row.name.trim(), instructions: row.instructions.trim() }
   if (paths.length) reviewer.paths = paths
   if (row.severityFloor) reviewer.severityFloor = row.severityFloor
-  if (row.maxComments.trim()) reviewer.maxComments = Number(row.maxComments.trim())
+  if (row.maxFindings.trim()) reviewer.maxFindings = Number(row.maxFindings.trim())
   if (!row.enabled) reviewer.enabled = false
   return reviewer
 }
@@ -377,9 +387,9 @@ export function reviewerRowErrors(rows: ReviewerRow[]): Partial<Record<ReviewerF
     if (!instructions) errors.instructions = "Say what this reviewer looks for"
     else if (instructions.length > MAX_REVIEWER_INSTRUCTIONS) errors.instructions = `At most ${MAX_REVIEWER_INSTRUCTIONS} characters`
     if (pathList(row.paths).length > MAX_RULE_PATHS) errors.paths = `At most ${MAX_RULE_PATHS} paths`
-    const max = row.maxComments.trim()
-    if (max && !(Number.isInteger(Number(max)) && Number(max) >= 1 && Number(max) <= MAX_REVIEWER_COMMENTS))
-      errors.maxComments = `Enter a whole number between 1 and ${MAX_REVIEWER_COMMENTS}`
+    const max = row.maxFindings.trim()
+    if (max && !(Number.isInteger(Number(max)) && Number(max) >= 1 && Number(max) <= MAX_REVIEWER_FINDINGS))
+      errors.maxFindings = `Enter a whole number between 1 and ${MAX_REVIEWER_FINDINGS}`
     return errors
   })
 }

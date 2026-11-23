@@ -831,6 +831,18 @@ describe("queueMissedNotifications", () => {
     expect(await queueMissedNotifications()).toBe(0);
     expect(await prisma.notificationDelivery.count()).toBe(0);
   });
+
+  it("never notifies about a trial, nor stamps it as notified", async () => {
+    await target();
+    const job = await finishedAgo(MISSED_NOTIFY_GRACE_MS + 60_000, "completed");
+    await prisma.reviewJob.update({ where: { id: job.id }, data: { trial: true, verdict: "pass" } });
+
+    await notifyJob(job.id);
+    expect(await queueMissedNotifications()).toBe(0);
+
+    expect(await prisma.notificationDelivery.count()).toBe(0);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id } })).notifiedAt).toBeNull();
+  });
 });
 
 describe("pending deliveries on the target list", () => {

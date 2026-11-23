@@ -10,7 +10,7 @@ import {
   ruleSuggestionIdParamSchema,
   saveRuleSuggestionSettingsSchema,
 } from "../schemas/ruleSuggestions.schema.ts";
-import { loadRuleAndReviewerRepositories, repositoryRuleIssues } from "./config.controller.ts";
+import { loadRuleAndReviewerRepositories, repositoryCombinedIssues } from "./config.controller.ts";
 import { requireRepoSettingsRules } from "./repos.controller.ts";
 
 // Rule suggestions drafted by worker/ruleSuggestions.ts. Nothing reaches a
@@ -303,8 +303,8 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
       // and do not block. Repository and folder saves take this workspace's
       // lock first, so none can add a clashing rule while this commits.
       const repos = await loadRuleAndReviewerRepositories(tx, workspaceId);
-      const before = new Set(repositoryRuleIssues(repos, workspace!.review_settings));
-      const issues = repositoryRuleIssues(repos, settings).filter((issue) => !before.has(issue));
+      const before = new Set(repositoryCombinedIssues(repos, workspace!.review_settings));
+      const issues = repositoryCombinedIssues(repos, settings).filter((issue) => !before.has(issue));
       if (issues.length) throw new HttpError(400, "Validation failed", { "rule.id": issues });
       await tx.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: settings } });
       appliedTarget = "global";

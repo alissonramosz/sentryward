@@ -40,10 +40,10 @@ export interface ResolvedConfig {
   warnings: string[];
   // The same, by layer, for callers that reject a save instead of warning.
   // Reviewers are included, so every save check that holds rules holds them.
-  ruleIssues: RuleIssue[];
+  combinedIssues: CombinedIssue[];
 }
 
-export interface RuleIssue {
+export interface CombinedIssue {
   layer: LayerName;
   // Which combined list the issue is about.
   list: "rules" | "reviewers";
@@ -125,7 +125,7 @@ function combinedFrom<K extends CombinedKey>(
   key: K,
   layers: [LayerName, ConfigOverride | undefined][],
   sources: Record<string, LayerName>,
-  issues: RuleIssue[],
+  issues: CombinedIssue[],
 ): NonNullable<ConfigOverride[K]> {
   const { one, many, noun, limit } = COMBINED[key];
   type Entry = NonNullable<ConfigOverride[K]>[number];
@@ -205,14 +205,14 @@ export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
   }
   // `profile` is decided above, not merged; attribute it to whoever named it.
   sources.profile = naming?.[0] ?? "default";
-  const ruleIssues: RuleIssue[] = [];
-  merged.rules = combinedFrom("rules", ordered, sources, ruleIssues);
-  merged.reviewers = combinedFrom("reviewers", ordered, sources, ruleIssues);
+  const combinedIssues: CombinedIssue[] = [];
+  merged.rules = combinedFrom("rules", ordered, sources, combinedIssues);
+  merged.reviewers = combinedFrom("reviewers", ordered, sources, combinedIssues);
   const config = configSchema.parse(merged);
   const ruleGuard = guardFor(layers, config, sources);
   if (ruleGuard) config.ruleGuard = ruleGuard;
 
-  return { config, sources, warnings: ruleIssues.map((issue) => issue.message), ruleIssues };
+  return { config, sources, warnings: combinedIssues.map((issue) => issue.message), combinedIssues };
 }
 
 

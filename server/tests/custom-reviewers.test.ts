@@ -78,10 +78,10 @@ describe("custom reviewer config", () => {
   it("reads snake_case from the repository file", () => {
     const parsed = parseRepoFile(
       ".sentryward.yaml",
-      "reviewers:\n  - id: docs\n    name: Docs\n    instructions: Public API without docs.\n    severity_floor: info\n    max_comments: 3\n",
+      "reviewers:\n  - id: docs\n    name: Docs\n    instructions: Public API without docs.\n    severity_floor: info\n    max_findings: 3\n",
     );
     expect(parsed).toEqual({
-      override: { reviewers: [{ id: "docs", name: "Docs", instructions: "Public API without docs.", severityFloor: "info", maxComments: 3 }] },
+      override: { reviewers: [{ id: "docs", name: "Docs", instructions: "Public API without docs.", severityFloor: "info", maxFindings: 3 }] },
       warnings: [],
     });
   });
@@ -100,13 +100,14 @@ describe("custom reviewer config", () => {
     expect(resolved.warnings).toEqual([
       "Custom reviewer api-contracts in the repository file was ignored: a custom reviewer with that id is already set in the global config",
     ]);
-    expect(resolved.ruleIssues[0]).toMatchObject({ layer: "repoFile", list: "reviewers", kind: "clash" });
+    expect(resolved.combinedIssues[0]).toMatchObject({ layer: "repoFile", list: "reviewers", kind: "clash" });
   });
 
   it("leaves a layer's reviewers out as a whole when together they pass the limit", () => {
     const below = Array.from({ length: MAX_REVIEWERS }, (_, i) => reviewer({ id: `r${i}` }));
     const resolved = resolveConfig({ global: { reviewers: below }, repoFile: { reviewers: [reviewer({ id: "extra" })] } });
-    expect(resolved.config.reviewers).toHaveLength(MAX_REVIEWERS);
+    expect(resolved.config.reviewers).toEqual(below);
+    expect(resolved.sources["reviewers.extra"]).toBeUndefined();
     expect(resolved.warnings[0]).toMatch(/^Custom reviewers in the repository file were ignored: together with the custom reviewers below them/);
   });
 
@@ -190,7 +191,7 @@ describe("runReview with custom reviewers", () => {
             }
           : { findings: [] },
     });
-    const result = await runReview({ changeSet: makeChangeSet(), config: withReviewers([reviewer({ maxComments: 1 })]) }, { generate });
+    const result = await runReview({ changeSet: makeChangeSet(), config: withReviewers([reviewer({ maxFindings: 1 })]) }, { generate });
     expect(result.findings.map((f) => f.title)).toEqual(["Major one"]);
     expect(result.validation.dropped.over_limit).toBe(1);
   });
@@ -208,7 +209,7 @@ describe("runReview with custom reviewers", () => {
 
 describe("capPerReviewer", () => {
   it("leaves findings without a limited reviewer alone", () => {
-    const cfg = withReviewers([reviewer({ maxComments: 1 })]);
+    const cfg = withReviewers([reviewer({ maxFindings: 1 })]);
     const findings = [finding({ title: "a" }), finding({ title: "b" }), finding({ title: "c", reviewer: "api-contracts" })];
     expect(capPerReviewer(findings, cfg)).toEqual({ findings, overLimit: 0 });
   });

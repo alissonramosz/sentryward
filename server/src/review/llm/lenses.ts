@@ -14,9 +14,9 @@ export interface Lens {
   id: string;
   kind: "general" | "specialist" | "custom";
   // What the pass looks for, appended to the system prompt. A specialist's is
-  // written here; a custom reviewer's comes from the dashboard or the base
-  // revision's config file, never from the change or a request, so both are
-  // trusted like the repository guidance and team rules.
+  // written here; a saved custom reviewer's comes from the dashboard or base
+  // revision, while a trial accepts it from an authorized settings editor's
+  // request. Both are treated as trusted like repository guidance and rules.
   instructions?: string;
   // A custom reviewer's display name, and the globs over file paths it
   // covers (absent: every reviewed file).

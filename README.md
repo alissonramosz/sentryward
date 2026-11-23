@@ -1587,7 +1587,7 @@ name (`· reviewer API contracts`). Each takes:
 | `instructions` | yes | What it looks for (at most 4000 characters). One kind of problem works best |
 | `paths` | no | Globs over file paths; it only reviews passes holding a file they match, and only reports on those files |
 | `severity_floor` | no | What it reports at all; defaults to `review.severity_floor` |
-| `max_comments` | no | At most this many of its findings per review, the most severe first (1 to 50) |
+| `max_findings` | no | At most this many of its findings per review, the most severe first (1 to 50) |
 | `enabled` | no | `false` keeps it in the settings without running it |
 
 - Enabled reviewers run on every review, independent of deep review. Each is
@@ -1598,13 +1598,15 @@ name (`· reviewer API contracts`). Each takes:
   revision) each add reviewers, and an id already set below is ignored with a
   warning, so a repository file cannot drop or redefine the workspace's. At
   most 8 in total, with 12000 characters of names, instructions and paths.
-- Their instructions come only from the dashboard or the base revision, so
-  they are trusted like `instructions` and rules. The team rules stay with the
+- A saved reviewer's instructions come only from the dashboard or the base
+  revision, and a trial's from an owner or admin's request, so they are
+  trusted like `instructions` and rules. The team rules stay with the
   general pass.
 - Their findings go through the same validation, claim checks, verification
-  and `max_findings` cap, after their own `max_comments`. Like specialists,
-  they are reported whatever `review.categories` says, a reworded duplicate of
-  a general finding is merged, and a failed pass is a warning.
+  and review-wide `max_findings` cap, after their own `max_findings` (which
+  limits the findings kept, on the dashboard as well as on the change). Like
+  specialists, they are reported whatever `review.categories` says, a reworded
+  duplicate of a general finding is merged, and a failed pass is a warning.
 - **Trial runs:** the editor on the Guidance tab can try a reviewer, saved or
   not, on any pull or merge request (owners and admins). A trial reviews the
   change with the draft added and the walkthrough off, shows the result on the
@@ -1718,7 +1720,7 @@ reviewers:                  # example; custom reviewers, added to the dashboard 
     instructions: Response shapes that change without a version bump.
     paths: ["server/src/routes/**"]
     severity_floor: minor
-    max_comments: 5
+    max_findings: 5
 rules:                      # example; team rules, added to the dashboard ones, see "Review rules" below
   - id: no-db-in-controllers
     description: Controllers must not import Prisma directly; go through services.

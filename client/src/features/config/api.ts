@@ -35,7 +35,7 @@ export interface CustomReviewer {
   instructions: string
   paths?: string[]
   severityFloor?: string
-  maxComments?: number
+  maxFindings?: number
   enabled?: boolean
 }
 

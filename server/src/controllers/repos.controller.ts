@@ -4,7 +4,7 @@ import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevision.ts";
 import { dropRepositoriesFromTargets } from "../services/notifications.ts";
-import { loadReviewConfig, repoSettingsRuleIssues, resolveDashboardLayers } from "../review/config/load.ts";
+import { loadReviewConfig, repoSettingsCombinedIssues, resolveDashboardLayers } from "../review/config/load.ts";
 import { directorySettingsSchema, normalizeDirectory, type DashboardOverride, type DirectorySetting } from "../review/config/schema.ts";
 import { hostOrigin } from "../review/forge/types.ts";
 import { adapterForConnection, loadWorkspaceConnection, toHttpError } from "../services/forge.ts";
@@ -283,11 +283,11 @@ export function requireRepoSettingsRules(
   settings: unknown,
   followGlobal: boolean,
 ) {
-  const after = repoSettingsRuleIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal });
+  const after = repoSettingsCombinedIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal });
   if (!after.length) return;
   const key = (issue: { directory?: number; message: string }) => `${issue.directory}:${issue.message}`;
   const before = new Set(
-    repoSettingsRuleIssues({ globalSettings, repoSettings: saved.settings, directories: saved.directories, followGlobal: false })
+    repoSettingsCombinedIssues({ globalSettings, repoSettings: saved.settings, directories: saved.directories, followGlobal: false })
       .filter((issue) => issue.directory !== undefined)
       .map(key),
   );
@@ -341,7 +341,7 @@ async function changeDirectories(
     }
     if (checkRules !== undefined) {
       const index = parsed.data.findIndex((dir) => dir.path === checkRules);
-      const issues = repoSettingsRuleIssues({
+      const issues = repoSettingsCombinedIssues({
         globalSettings,
         repoSettings: row.settings,
         directories: parsed.data,

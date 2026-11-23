@@ -366,7 +366,7 @@ export const customReviewerSchema = z.strictObject({
   // What it reports at all; absent uses review.severityFloor.
   severityFloor: severitySchema.optional(),
   // At most this many of its findings per review, the most severe first.
-  maxComments: z.number().int().min(1).max(50).optional(),
+  maxFindings: z.number().int().min(1).max(50).optional(),
   // A disabled reviewer is kept in the settings but never runs.
   enabled: z.boolean().optional(),
 });

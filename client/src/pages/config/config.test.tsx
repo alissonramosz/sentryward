@@ -2386,12 +2386,12 @@ describe("Custom reviewers", { timeout: 20_000 }, () => {
     expect(screen.getByRole("button", { name: "Save global config" })).toBeDisabled()
 
     await userEvent.type(screen.getByLabelText("Looks for"), "Response shapes that change.")
-    await userEvent.type(screen.getByLabelText("Comment limit"), "3")
+    await userEvent.type(screen.getByLabelText("Finding limit"), "3")
     await userEvent.click(screen.getByRole("button", { name: "Try it" }))
     expect(await screen.findByRole("link", { name: "Open the trial" })).toHaveAttribute("href", "/reviews/trial-1")
     expect(trial).toEqual({
       url: "https://github.com/acme/web/pull/42",
-      reviewer: { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change.", maxComments: 3 },
+      reviewer: { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change.", maxFindings: 3 },
     })
 
     await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
@@ -2400,9 +2400,26 @@ describe("Custom reviewers", { timeout: 20_000 }, () => {
         revision: "g1",
         settings: {
           llm: { connection: "openai" },
-          reviewers: [{ id: "api-contracts", name: "API contracts", instructions: "Response shapes that change.", maxComments: 3 }],
+          reviewers: [{ id: "api-contracts", name: "API contracts", instructions: "Response shapes that change.", maxFindings: 3 }],
         },
       }),
     )
+  })
+
+  it("keeps each reviewer's trial with it when one above is removed", async () => {
+    const reviewers = [
+      { id: "docs", name: "Docs", instructions: "Public API without docs." },
+      { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change." },
+    ]
+    mockApi(globalRoutes({ "GET /api/config/global": globalConfig({ llm: { connection: "openai" }, reviewers }) }))
+    renderWithProviders(<App />, { route: "/configuration?tab=guidance" })
+
+    await screen.findByRole("button", { name: "Remove reviewer 2" })
+    const [, second] = screen.getAllByLabelText("Try on a pull or merge request")
+    await userEvent.type(second!, "https://github.com/acme/web/pull/7")
+    await userEvent.click(screen.getByRole("button", { name: "Remove reviewer 1" }))
+
+    expect(screen.getByLabelText("Name")).toHaveValue("API contracts")
+    expect(screen.getByLabelText("Try on a pull or merge request")).toHaveValue("https://github.com/acme/web/pull/7")
   })
 })

@@ -8,7 +8,7 @@ import { CATEGORIES, SEVERITIES } from "../review/core/severity.ts";
 import { THINKING_BUDGETS } from "../review/llm/thinking.ts";
 import { PROFILES } from "../review/config/profiles.ts";
 import { skipReason, walkthroughEnabled, type ReviewTrigger } from "../review/config/filters.ts";
-import { repoSettingsRuleIssues } from "../review/config/load.ts";
+import { repoSettingsCombinedIssues } from "../review/config/load.ts";
 import { resolveConfig } from "../review/config/resolve.ts";
 import {
   DEFAULT_CONFIG,
@@ -50,15 +50,15 @@ function globalConfigBody(saved: unknown) {
   const parsed = dashboardOverrideSchema.safeParse(saved);
   const warnings = parsed.success ? [] : ["Saved global settings are no longer valid and were ignored"];
   const settings = parsed.success ? parsed.data : {};
-  const { ruleIssues: _ruleIssues, ...resolved } = resolveConfig({ global: settings });
+  const { combinedIssues: _combinedIssues, ...resolved } = resolveConfig({ global: settings });
   return { settings, ...resolved, warnings: [...warnings, ...resolved.warnings] };
 }
 
 // The global rules always win, so a save is not refused when they leave a
 // repository's own rules out; the owner is told which repositories lost them,
 // on every read until it is fixed.
-async function repositoryRuleWarnings(workspaceId: string, globalSettings: unknown): Promise<string[]> {
-  return repositoryRuleIssues(await loadRuleAndReviewerRepositories(prisma, workspaceId), globalSettings);
+async function repositoryCombinedWarnings(workspaceId: string, globalSettings: unknown): Promise<string[]> {
+  return repositoryCombinedIssues(await loadRuleAndReviewerRepositories(prisma, workspaceId), globalSettings);
 }
 
 export type RuleOrReviewerRepository = { fullPath: string; settings: unknown; directories: unknown };
@@ -87,11 +87,11 @@ export async function loadRuleAndReviewerRepositories(
   });
 }
 
-// The repository and folder rules these global settings leave out, one
-// message each, prefixed with the repository.
-export function repositoryRuleIssues(repos: RuleOrReviewerRepository[], globalSettings: unknown): string[] {
+// The repository and folder rules and custom reviewers these global settings
+// leave out, one message each, prefixed with the repository.
+export function repositoryCombinedIssues(repos: RuleOrReviewerRepository[], globalSettings: unknown): string[] {
   return repos.flatMap((repo) =>
-    repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
+    repoSettingsCombinedIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
       (issue) => `${repo.fullPath}: ${issue.message}`,
     ),
   );
@@ -107,7 +107,7 @@ export async function getGlobalConfig(req: Request, res: Response) {
 
 async function globalConfigResponse(workspaceId: string, saved: unknown) {
   const body = globalConfigBody(saved);
-  const repositories = await repositoryRuleWarnings(workspaceId, saved);
+  const repositories = await repositoryCombinedWarnings(workspaceId, saved);
   return { ...body, revision: settingsRevision(saved), warnings: [...body.warnings, ...repositories] };
 }
 

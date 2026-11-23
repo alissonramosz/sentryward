@@ -12,8 +12,8 @@ import { useStartTrial } from "@/features/reviews/api"
 import { ApiError } from "@/lib/api"
 import type { CustomReviewer } from "./api"
 import {
-  EMPTY_REVIEWER,
   MAX_REVIEWERS,
+  newReviewerRow,
   reviewerIdFrom,
   reviewerRowErrors,
   reviewerRowValid,
@@ -146,7 +146,7 @@ export function ReviewersField(props: {
         const n = index + 1
         const shadowedBy = inheritedIds.get(row.id.trim())
         return (
-          <div key={index} className="flex flex-col gap-3 rounded-lg border p-3">
+          <div key={row.key} className="flex flex-col gap-3 rounded-lg border p-3">
             <div className="flex items-start gap-2">
               <div className="grid flex-1 gap-3 @md/field-group:grid-cols-2">
                 <Field data-invalid={errors.name ? true : undefined}>
@@ -244,19 +244,19 @@ export function ReviewersField(props: {
                   disabled={props.disabled}
                 />
               </Field>
-              <Field data-invalid={errors.maxComments ? true : undefined}>
-                <FieldLabel htmlFor={`reviewer-${n}-max`}>Comment limit</FieldLabel>
+              <Field data-invalid={errors.maxFindings ? true : undefined}>
+                <FieldLabel htmlFor={`reviewer-${n}-max`}>Finding limit</FieldLabel>
                 <Input
                   id={`reviewer-${n}-max`}
                   inputMode="numeric"
-                  value={row.maxComments}
-                  onChange={(e) => update(index, { maxComments: e.target.value })}
+                  value={row.maxFindings}
+                  onChange={(e) => update(index, { maxFindings: e.target.value })}
                   placeholder="No limit"
                   disabled={props.disabled}
-                  aria-invalid={errors.maxComments ? true : undefined}
+                  aria-invalid={errors.maxFindings ? true : undefined}
                 />
                 <FieldDescription>Most severe first.</FieldDescription>
-                {errors.maxComments && <FieldError>{errors.maxComments}</FieldError>}
+                {errors.maxFindings && <FieldError>{errors.maxFindings}</FieldError>}
               </Field>
             </div>
             {props.canTry && <TrialForm row={row} n={n} disabled={props.disabled} />}
@@ -268,7 +268,7 @@ export function ReviewersField(props: {
           type="button"
           variant="outline"
           size="sm"
-          onClick={() => props.onChange([...rows, { ...EMPTY_REVIEWER }])}
+          onClick={() => props.onChange([...rows, newReviewerRow()])}
           disabled={props.disabled || total >= MAX_REVIEWERS}
         >
           <Plus />

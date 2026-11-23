@@ -22,7 +22,7 @@ function camelToSnake(key: string): string {
 }
 
 // List items are converted too: custom reviewers are objects in a list
-// (max_comments, severity_floor). Rules are as well, but none of their keys
+// (max_findings, severity_floor). Rules are as well, but none of their keys
 // has an underscore, and strings in a list pass through unchanged.
 function camelizeKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(camelizeKeys);

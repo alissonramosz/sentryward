@@ -1015,6 +1015,9 @@ describe("POST /api/reviews/trial", () => {
   });
 
   it("is for settings editors only", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+    const started = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ repoId, number: 7, reviewer });
+    expect(started.status).toBe(202);
     const owner = await createUser("owner@example.com");
     const team = await createTeam(owner.user.id);
     const repo = await prisma.repository.findUniqueOrThrow({ where: { id: repoId } });
@@ -1028,5 +1031,13 @@ describe("POST /api/reviews/trial", () => {
       .set(...inWorkspace(team.id))
       .send({ repoId, number: 7, reviewer });
     expect(res.status).toBe(403);
+
+    // A member sees the trial, but not the draft as it was sent, and cannot run it again.
+    const detail = await request(app).get(`/api/reviews/${started.body.review.id}`).set("Cookie", cookie).set(...inWorkspace(team.id));
+    expect(detail.status).toBe(200);
+    expect(detail.body.review.trial).toBe(true);
+    expect(detail.body.review).not.toHaveProperty("trialReviewer");
+    const rerun = await request(app).post(`/api/reviews/${started.body.review.id}/rerun`).set("Cookie", cookie).set(...inWorkspace(team.id));
+    expect(rerun.status).toBe(403);
   });
 });

@@ -1874,7 +1874,7 @@ describe("privacy policy", () => {
 describe("trial runs", () => {
   const draft = { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change without a version bump." };
 
-  it("reviews with the draft added, stores the result and posts and tracks nothing", async () => {
+  it("reviews with the draft added, stores the result, posts nothing and syncs no findings", async () => {
     await enqueueTrial({ repositoryId, number: 42, headSha: "oldhead", reviewer: draft });
     const job = (await claimNext())!;
     expect(job.trial).toBe(true);

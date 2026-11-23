@@ -3,7 +3,7 @@ import type { ForgeAdapter } from "../forge/types.ts";
 import { parseRepoFile, REPO_CONFIG_FILES } from "./repoFile.ts";
 import type { ChangedFile } from "../core/models.ts";
 import { pickDirectory } from "./directories.ts";
-import { resolveConfig, type ResolvedConfig, type RuleIssue } from "./resolve.ts";
+import { resolveConfig, type ResolvedConfig, type CombinedIssue } from "./resolve.ts";
 import {
   dashboardOverrideSchema,
   directorySettingsSchema,
@@ -98,17 +98,17 @@ export function resolveDashboardLayers(input: SavedSettings): ResolvedConfig {
   return resolveConfig({ global, repoSettings });
 }
 
-// Rules a repository's own settings, or one of its folders, could not add on
-// top of the layers below, so a save can be refused instead of the rules being
-// left out of every review with only a warning. `directory` is the index of
+// Rules and custom reviewers a repository's own settings, or one of its
+// folders, could not add on top of the layers below, so a save can be refused
+// instead of them being left out of every review with only a warning. `directory` is the index of
 // the folder at fault, or undefined for the repository settings.
-export function repoSettingsRuleIssues(input: SavedSettings): (RuleIssue & { directory?: number })[] {
+export function repoSettingsCombinedIssues(input: SavedSettings): (CombinedIssue & { directory?: number })[] {
   const { global, repoSettings, directories } = savedLayers(input, []);
-  const issues: (RuleIssue & { directory?: number })[] = resolveConfig({ global, repoSettings }).ruleIssues.filter(
+  const issues: (CombinedIssue & { directory?: number })[] = resolveConfig({ global, repoSettings }).combinedIssues.filter(
     (issue) => issue.layer === "repoSettings",
   );
   directories.forEach((dir, index) => {
-    for (const issue of resolveConfig({ global, repoSettings, directory: dir.settings }).ruleIssues) {
+    for (const issue of resolveConfig({ global, repoSettings, directory: dir.settings }).combinedIssues) {
       if (issue.layer === "directory") issues.push({ ...issue, message: `${dir.path}: ${issue.message}`, directory: index });
     }
   });

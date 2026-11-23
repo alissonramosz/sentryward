@@ -366,7 +366,8 @@ async function loadOwnedReview(workspaceId: string, id: string) {
       resolvedConfig: true,
       focus: true,
       deep: true,
-      trialReviewer: true,
+      // Not trialReviewer: every member reads this, and trials are for
+      // admins; a re-run reads it after its own role check.
       resultExpiredAt: true,
       progress: true,
     },

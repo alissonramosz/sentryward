@@ -308,12 +308,12 @@ export function validateFindings(
 }
 
 // The first `max` of findings already sorted by compareFindings.
-// At most a custom reviewer's maxComments of its findings, the most severe
+// At most a custom reviewer's maxFindings of its findings, the most severe
 // first; findings arrive sorted by compareFindings, so the first ones are kept.
 // Applied before the review-wide cap, so one chatty reviewer cannot use up
 // the slots the general pass needs.
 export function capPerReviewer(findings: Finding[], config: Config): { findings: Finding[]; overLimit: number } {
-  const limits = new Map(config.reviewers.flatMap((reviewer) => (reviewer.maxComments ? [[reviewer.id, reviewer.maxComments] as const] : [])));
+  const limits = new Map(config.reviewers.flatMap((reviewer) => (reviewer.maxFindings ? [[reviewer.id, reviewer.maxFindings] as const] : [])));
   if (!limits.size) return { findings, overLimit: 0 };
   const counts = new Map<string, number>();
   const kept = findings.filter((finding) => {
