@@ -392,14 +392,16 @@ export async function releaseLease(id: string, attempts: number): Promise<void> 
 // worker (a later attempt) is lost, and the run must leave it alone. So is one
 // whose change has a newer job that already started: that happens only when
 // this run's lease ran out while it was still alive (a stalled process), and
-// the newer head must win, so this run publishes nothing more.
+// the newer head must win, so this run publishes nothing more. A trial is never
+// overtaken that way: it publishes nothing to race (see enqueueTrial).
 export async function claimState(id: string, attempts: number): Promise<"owned" | "cancelled" | "disabled" | "lost"> {
   const job = await prisma.reviewJob.findUnique({
     where: { id },
-    select: { status: true, attempts: true, error: true, repositoryId: true, number: true, createdAt: true },
+    select: { status: true, attempts: true, error: true, repositoryId: true, number: true, createdAt: true, trial: true },
   });
   if (job?.status === "cancelled") return job.error && OFF_REASONS.includes(job.error) ? "disabled" : "cancelled";
   if (job?.status !== "running" || job.attempts !== attempts) return "lost";
+  if (job.trial) return "owned";
   const newer = await prisma.reviewJob.findFirst({
     where: {
       repositoryId: job.repositoryId,
@@ -443,16 +445,19 @@ export async function recoverStale(
 
   const retryable = await prisma.reviewJob.findMany({
     where: { ...stale, attempts: { lt: maxAttempts } },
-    select: { id: true, repositoryId: true, number: true, createdAt: true },
+    select: { id: true, repositoryId: true, number: true, createdAt: true, trial: true },
   });
   let recovered = 0;
   for (const job of retryable) {
     recovered += await prisma.$transaction(async (tx) => {
       await lockEnqueue(tx, job.repositoryId, job.number);
-      const newer = await tx.reviewJob.findFirst({
-        where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
-        select: { id: true },
-      });
+      // Trials and reviews never supersede each other (see enqueueTrial).
+      const newer = job.trial
+        ? null
+        : await tx.reviewJob.findFirst({
+            where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
+            select: { id: true },
+          });
       // Still stale: a heartbeat that landed since means the worker is alive.
       const { count } = await tx.reviewJob.updateMany({
         where: { id: job.id, ...stale },
@@ -495,14 +500,16 @@ export async function requeueInterrupted(jobs: { id: string; attempts: number }[
       requeued += await prisma.$transaction(async (tx) => {
         const job = await tx.reviewJob.findUnique({
           where: { id },
-          select: { repositoryId: true, number: true, createdAt: true },
+          select: { repositoryId: true, number: true, createdAt: true, trial: true },
         });
         if (!job) return 0;
         await lockEnqueue(tx, job.repositoryId, job.number);
-        const newer = await tx.reviewJob.findFirst({
-          where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
-          select: { id: true },
-        });
+        const newer = job.trial
+          ? null
+          : await tx.reviewJob.findFirst({
+              where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
+              select: { id: true },
+            });
         const leaseExpiresAt = new Date(Date.now() + HANDBACK_LEASE_MS);
         const { count } = await tx.reviewJob.updateMany({
           where: { id, attempts, status: "running" },

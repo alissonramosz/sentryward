@@ -12,6 +12,7 @@ import {
   complete,
   enqueue,
   enqueueFromWebhook,
+  enqueueTrial,
   fail,
   DISABLED_REASON,
   heartbeat,
@@ -58,6 +59,9 @@ afterAll(async () => {
 
 const job = (headSha: string, number = 7) =>
   enqueue({ repositoryId, number, headSha, trigger: "webhook" });
+
+const trial = (headSha: string, number = 7) =>
+  enqueueTrial({ repositoryId, number, headSha, reviewer: { id: "draft", name: "Draft", instructions: "Look for draft issues." } });
 
 const HOUR_AGO = () => new Date(Date.now() - 60 * 60 * 1000);
 const expireLease = (id: string) => prisma.reviewJob.update({ where: { id }, data: { leaseExpiresAt: HOUR_AGO() } });
@@ -460,6 +464,26 @@ describe("recoverStale", () => {
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: newer.id } })).status).toBe("queued");
   });
 
+  it("requeues a stale trial even when a newer review of its change is queued", async () => {
+    const stale = await trial("aaa");
+    await claimNext();
+    await prisma.reviewJob.update({ where: { id: stale.id }, data: { lockedAt: HOUR_AGO() } });
+    await job("bbb");
+
+    expect((await recoverStale(15 * 60 * 1000, 3)).count).toBe(1);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: stale.id } })).status).toBe("queued");
+  });
+
+  it("requeues a stale review when only a newer trial of its change is queued", async () => {
+    const stale = await job("aaa");
+    await claimNext();
+    await prisma.reviewJob.update({ where: { id: stale.id }, data: { lockedAt: HOUR_AGO() } });
+    await trial("bbb");
+
+    expect((await recoverStale(15 * 60 * 1000, 3)).count).toBe(1);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: stale.id } })).status).toBe("queued");
+  });
+
   it("requeues a stale job with attempts left and fails one without", async () => {
     const retry = await job("aaa", 1);
     const exhausted = await job("bbb", 2);
@@ -536,6 +560,18 @@ describe("requeueInterrupted", () => {
     expect(await claimNext()).toBeNull();
     await expireLease(older.id);
     expect((await claimNext())?.id).toBe(newer.id);
+  });
+
+  it("hands back a trial even when its change has a newer review", async () => {
+    const interrupted = await trial("aaa");
+    await claimNext();
+    await job("bbb");
+
+    expect(await requeueInterrupted([{ id: interrupted.id, attempts: 1 }])).toBe(1);
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: interrupted.id } })).toMatchObject({
+      status: "queued",
+      attempts: 0,
+    });
   });
 
   it("an abandoned run cannot extend the hand-back lease", async () => {
@@ -695,6 +731,26 @@ describe("claimState", () => {
     await claimNext();
 
     expect(await claimState(claimed.id, claimed.attempts)).toBe("lost");
+  });
+
+  it("keeps a trial owned once a newer review of its change has started", async () => {
+    await trial("aaa");
+    const claimed = (await claimNext())!;
+    await expireLease(claimed.id);
+    await job("bbb");
+    await claimNext();
+
+    expect(await claimState(claimed.id, claimed.attempts)).toBe("owned");
+  });
+
+  it("keeps a review owned once a newer trial of its change has started", async () => {
+    await job("aaa");
+    const claimed = (await claimNext())!;
+    await expireLease(claimed.id);
+    await trial("bbb");
+    expect((await claimNext())?.trial).toBe(true);
+
+    expect(await claimState(claimed.id, claimed.attempts)).toBe("owned");
   });
 
   it("stays owned while a newer job for the change only waits", async () => {

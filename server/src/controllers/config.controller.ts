@@ -58,34 +58,38 @@ function globalConfigBody(saved: unknown) {
 // repository's own rules out; the owner is told which repositories lost them,
 // on every read until it is fixed.
 async function repositoryRuleWarnings(workspaceId: string, globalSettings: unknown): Promise<string[]> {
-  return repositoryRuleIssues(await loadRuleRepositories(prisma, workspaceId), globalSettings);
+  return repositoryRuleIssues(await loadRuleAndReviewerRepositories(prisma, workspaceId), globalSettings);
 }
 
-export type RuleRepository = { fullPath: string; settings: unknown; directories: unknown };
+export type RuleOrReviewerRepository = { fullPath: string; settings: unknown; directories: unknown };
 
-// The workspace's repositories with rules of their own (or in a folder) that
-// the global settings apply under. Shared with rule suggestion approvals, so
-// what an approval refuses and what this page warns about cannot drift apart.
-export async function loadRuleRepositories(db: PrismaClient | Prisma.TransactionClient, workspaceId: string): Promise<RuleRepository[]> {
+// The workspace's repositories with rules or custom reviewers of their own (or
+// in a folder) that the global settings apply under. Shared with rule
+// suggestion approvals, so what an approval refuses and what this page warns
+// about cannot drift apart.
+export async function loadRuleAndReviewerRepositories(
+  db: PrismaClient | Prisma.TransactionClient,
+  workspaceId: string,
+): Promise<RuleOrReviewerRepository[]> {
   const repos = await db.repository.findMany({
     where: { connection: { workspaceId }, followGlobal: false },
     select: { fullPath: true, settings: true, directories: true },
   });
   // Custom reviewers combine across layers like rules, so they can be left
   // out the same way.
-  const hasRules = (settings: unknown) => {
+  const hasRulesOrReviewers = (settings: unknown) => {
     const own = settings as { rules?: unknown[]; reviewers?: unknown[] } | null;
     return (Array.isArray(own?.rules) && own.rules.length > 0) || (Array.isArray(own?.reviewers) && own.reviewers.length > 0);
   };
   return repos.filter((repo) => {
     const directories = Array.isArray(repo.directories) ? (repo.directories as { settings?: unknown }[]) : [];
-    return hasRules(repo.settings) || directories.some((dir) => hasRules(dir?.settings));
+    return hasRulesOrReviewers(repo.settings) || directories.some((dir) => hasRulesOrReviewers(dir?.settings));
   });
 }
 
 // The repository and folder rules these global settings leave out, one
 // message each, prefixed with the repository.
-export function repositoryRuleIssues(repos: RuleRepository[], globalSettings: unknown): string[] {
+export function repositoryRuleIssues(repos: RuleOrReviewerRepository[], globalSettings: unknown): string[] {
   return repos.flatMap((repo) =>
     repoSettingsRuleIssues({ globalSettings, repoSettings: repo.settings, directories: repo.directories }).map(
       (issue) => `${repo.fullPath}: ${issue.message}`,

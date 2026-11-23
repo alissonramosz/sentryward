@@ -956,7 +956,8 @@ describe("POST /api/reviews/trial", () => {
 
   it("queues a trial at the change's head, kept out of the change view and the stats", async () => {
     vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
-    await completedJob();
+    const done = await completedJob();
+    const statsBefore = (await request(app).get("/api/reviews/stats").set("Cookie", cookie)).body;
 
     const res = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ repoId, number: 7, reviewer });
     expect(res.status).toBe(202);
@@ -965,6 +966,22 @@ describe("POST /api/reviews/trial", () => {
       trial: true,
       trialReviewer: reviewer,
     });
+
+    // Finished the way the worker finishes a run, with a verdict, a duration
+    // and the completed review's usage, so the stats would count it if they
+    // counted trials.
+    await prisma.reviewJob.update({
+      where: { id: res.body.review.id },
+      data: {
+        status: "completed",
+        verdict: "blocked",
+        startedAt: new Date(Date.now() - 60_000),
+        finishedAt: new Date(),
+        summary: done.summary as object,
+      },
+    });
+    const stats = await request(app).get("/api/reviews/stats").set("Cookie", cookie);
+    expect(stats.body).toEqual(statsBefore);
 
     const changes = await request(app).get("/api/reviews?view=changes").set("Cookie", cookie);
     expect(changes.body.total).toBe(1);
