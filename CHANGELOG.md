@@ -11,8 +11,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
 ### Added
 
 - Custom reviewers (`reviewers`). A team defines extra reviewers with a name,
-  instructions, optional file globs (`paths`), severity floor and comment limit
-  (`max_comments`), in the global, repository or folder settings (new editor on
+  instructions, optional file globs (`paths`), severity floor and finding limit
+  (`max_findings`), in the global, repository or folder settings (new editor on
   the Guidance tab) or `.sentryward.yaml`. Like rules they combine across
   layers: a layer adds reviewers and an id already set below is ignored with a
   warning, and saves that would leave one out are refused under `reviewers`.
@@ -29,7 +29,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   walkthrough and posts, syncs and notifies nothing. Trials never supersede,
   answer or block the change's reviews, are not an incremental base, a
   previous verdict or the backlog's source, and are left out of the change
-  view and review stats; re-running one tries the same draft.
+  view and review stats; re-running one tries the same draft. The config a
+  trial stores keeps only the draft's id and name, since every member can
+  read it.
 
 - Deep review (`review.deep`). Off by default; when on, every review pass of a
   change is reviewed again by up to seven specialists (`naming`,

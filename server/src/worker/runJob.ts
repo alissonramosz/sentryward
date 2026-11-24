@@ -173,6 +173,21 @@ export function withTrialReviewer(config: Config, job: Pick<ReviewJob, "trial" |
   };
 }
 
+// The config a trial stores keeps only the draft's id and name (what the
+// review page reads to name its findings): every member reads the stored
+// config, and the draft is an admin's unsaved work. The run itself uses the
+// whole draft; a re-run reads it from trialReviewer.
+export function storedTrialConfig(config: Config, job: Pick<ReviewJob, "trial" | "trialReviewer">): unknown {
+  if (!job.trial) return config;
+  const draftId = (job.trialReviewer as { id?: unknown } | null)?.id;
+  return {
+    ...config,
+    reviewers: config.reviewers.map((reviewer) =>
+      reviewer.id === draftId ? { id: reviewer.id, name: reviewer.name, enabled: true } : reviewer,
+    ),
+  };
+}
+
 // Loads everything a review needs, runs it, publishes it and stores the
 // result. Anything thrown before the review starts (the repository vanished,
 // the forge is down, no model key) fails the job through the worker, and
@@ -277,7 +292,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     await complete(job.id, job.attempts, {
       status: "skipped",
       verdict: null,
-      resolvedConfig: { config, sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory },
+      resolvedConfig: { config: storedTrialConfig(config, job), sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory },
       error: skip,
       headSha: changeSet.forgeRef.headSha,
       baseSha: changeSet.forgeRef.baseSha,
@@ -334,7 +349,7 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
 
   const targetUrl = `${env.CLIENT_ORIGIN}/reviews/${job.id}`;
   const ref = changeSet.forgeRef;
-  const resolvedConfig = { config, sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory };
+  const resolvedConfig = { config: storedTrialConfig(config, job), sources: loaded.sources, repoFile: loaded.repoFile, directory: loaded.directory };
 
   // A person can cancel any running job, so it is always watched. Closing the
   // change cancels its queued jobs from the webhook; with abortOnClose this also

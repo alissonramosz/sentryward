@@ -776,6 +776,31 @@ describe("GET and PUT /api/config/global", () => {
     });
   });
 
+  it("warns about a repository custom reviewer a later global reviewer leaves out", async () => {
+    const reviewer = { id: "api", name: "API", instructions: "Response shapes." };
+    // A repository with reviewers but no rules, so only its reviewers get it
+    // checked against the global settings.
+    const repo = await prisma.repository.create({
+      data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/later", externalId: "12", defaultBranch: "main", followGlobal: false },
+    });
+    const saved = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: { reviewers: [reviewer] }, settingsRevision: await repoRevision(repo.id) });
+    expect(saved.status).toBe(200);
+
+    const global = await request(app)
+      .put("/api/config/global")
+      .set("Cookie", cookie)
+      .send({ settings: { llm: { connection: "openai" }, reviewers: [{ ...reviewer, name: "Global API" }] }, revision: await globalRevision() });
+    expect(global.status).toBe(200);
+    const warning =
+      "team/later: Custom reviewer api in the repository settings was ignored: a custom reviewer with that id is already set in the global config";
+    expect(global.body.warnings).toEqual([warning]);
+    const read = await request(app).get("/api/config/global").set("Cookie", cookie);
+    expect(read.body.warnings).toEqual([warning]);
+  });
+
   it("refuses repository rules the global rules would leave out, and warns when global rules grow", async () => {
     const many = (prefix: string, count: number) =>
       Array.from({ length: count }, (_, i) => ({ id: `${prefix}-${i}`, description: "Rule.", severity: "minor" }));

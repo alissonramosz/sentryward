@@ -361,8 +361,9 @@ export const customReviewerSchema = z.strictObject({
     .refine((id) => !RESERVED_REVIEWER_IDS.has(id), "This id is used by a built-in reviewer; choose another"),
   name: z.string().trim().min(1).max(60),
   instructions: z.string().trim().min(1).max(4000),
-  // Globs over the file path; absent means every reviewed file.
-  paths: z.array(z.string().min(1)).max(50).optional(),
+  // Globs over the file path; absent means every reviewed file. An empty
+  // list is refused, since it would read as "every file" too.
+  paths: z.array(z.string().min(1)).min(1).max(50).optional(),
   // What it reports at all; absent uses review.severityFloor.
   severityFloor: severitySchema.optional(),
   // At most this many of its findings per review, the most severe first.

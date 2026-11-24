@@ -244,6 +244,17 @@ describe("notifyJob filters", () => {
     expect(await previousVerdict(prisma, unfinished)).toBeUndefined();
   });
 
+  it("never takes a trial run for the previous review", async () => {
+    const hook = await target({ events: ["resolved", "completed"] });
+    await finishedJob("completed", "blocked");
+    const trial = await finishedJob("completed", "pass");
+    await prisma.reviewJob.update({ where: { id: trial.id }, data: { trial: true } });
+    const fixed = await finishedJob("completed", "pass");
+
+    expect(await previousVerdict(prisma, fixed)).toBe("blocked");
+    expect(await queued(hook.id, fixed.id)).toBe("resolved");
+  });
+
   it("names resolved in the webhook, Slack and email", async () => {
     const stub = fetchStub([
       { method: "POST", url: /hooks\.example\.com/ },

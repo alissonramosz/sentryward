@@ -1677,6 +1677,34 @@ describe("runJob on a push after a completed review", () => {
     expect(result.incremental.carried).toBe(0);
   });
 
+  it("builds on the last real review, never a trial run after it", async () => {
+    await reviewFirst();
+    const last = await prisma.reviewJob.findFirstOrThrow({ where: { repositoryId, headSha: "h1" } });
+    // A later trial at a newer head that found nothing: built on, it would
+    // compare from h2 and carry no findings.
+    await prisma.reviewJob.create({
+      data: {
+        repositoryId,
+        number: 42,
+        headSha: "h2",
+        trigger: "manual",
+        trial: true,
+        status: "completed",
+        result: { ...(last.result as object), findings: [] },
+        resolvedConfig: last.resolvedConfig as object,
+        finishedAt: new Date(last.finishedAt!.getTime() + 60_000),
+      },
+    });
+    const next = deps({}, fixed, { anthropic: "k" }, { head: "h3", files: FILES, compare: ["src/util.ts"] });
+    const { job, stored } = await push("h3");
+
+    await runJob(job, next.runDeps);
+
+    expect(next.reads).toContain("compare:h1..h3");
+    const result = (await stored()).result as { incremental: { fromSha: string; carried: number } };
+    expect(result.incremental).toMatchObject({ fromSha: "h1", carried: 1 });
+  });
+
   it("still reviews incrementally after a review stored before rules existed", async () => {
     await reviewFirst();
     const last = await prisma.reviewJob.findFirstOrThrow({ where: { repositoryId, headSha: "h1" } });
@@ -1896,7 +1924,10 @@ describe("trial runs", () => {
     const result = stored.result as ReviewResult;
     expect(result.findings.map((f) => [f.title, f.reviewerName])).toEqual([["The response drops a field", "API contracts"]]);
     expect(result.warnings).toContain(TRIAL_WARNING);
-    expect(stored.resolvedConfig).toMatchObject({ config: { reviewers: [{ id: "api-contracts", enabled: true }] } });
+    // Every member reads the stored config, so the draft is kept to its id
+    // and name.
+    expect(stored.resolvedConfig).toMatchObject({ config: { reviewers: [{ id: "api-contracts", name: "API contracts", enabled: true }] } });
+    expect((stored.resolvedConfig as { config: { reviewers: object[] } }).config.reviewers[0]).not.toHaveProperty("instructions");
     // The general pass and the draft's, and no walkthrough.
     expect(model.requests.filter((request) => request.schemaName === "code_review")).toHaveLength(2);
     expect(model.requests.some((request) => request.schemaName === "walkthrough")).toBe(false);

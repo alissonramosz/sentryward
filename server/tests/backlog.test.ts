@@ -248,6 +248,22 @@ describe("recording and applying a merge", () => {
     expect(fresh).toMatchObject({ fingerprint: "fp-new", state: "open" });
   });
 
+  it("takes the merged change's last real review, never a trial run after it", async () => {
+    await finding(7, "fp-old");
+    await merge(7);
+    await finding(8, "fp-new");
+    const reviewed = await job(8, result({}, [modified("src/app.ts", REWRITE_21)]));
+    // A newer trial that read no files: taken for the merge, it would fix nothing.
+    const trial = await job(8, result(), new Date(Date.now() + 60_000));
+    await prisma.reviewJob.update({ where: { id: trial.id }, data: { trial: true } });
+
+    expect(await merge(8)).toEqual({ promoted: 1, fixed: 1, invalidated: 0 });
+    const [fresh, old] = await items();
+    expect(old).toMatchObject({ fingerprint: "fp-old", state: "resolved", resolvedJobId: reviewed.id });
+    const res = await request(app).get(`/api/backlog/${fresh!.id}`).set("Cookie", cookie);
+    expect(res.body.sourceReviewId).toBe(reviewed.id);
+  });
+
   it("reopens a resolved item that ships again, and leaves a dismissed one dismissed", async () => {
     await finding(7, "fp-back");
     await finding(7, "fp-dismissed");

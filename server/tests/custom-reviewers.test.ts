@@ -70,6 +70,8 @@ describe("custom reviewer config", () => {
   it("refuses ids the built-in reviewers use, duplicates and too many", () => {
     expect(customReviewerSchema.safeParse(reviewer({ id: "tests" })).success).toBe(false);
     expect(customReviewerSchema.safeParse(reviewer({ id: "general" })).success).toBe(false);
+    // Every file is said by leaving paths out, never by an empty list.
+    expect(customReviewerSchema.safeParse(reviewer({ paths: [] })).success).toBe(false);
     expect(configOverrideSchema.safeParse({ reviewers: [reviewer(), reviewer()] }).success).toBe(false);
     const many = Array.from({ length: MAX_REVIEWERS + 1 }, (_, i) => reviewer({ id: `r${i}` }));
     expect(configOverrideSchema.safeParse({ reviewers: many }).success).toBe(false);
@@ -204,6 +206,18 @@ describe("runReview with custom reviewers", () => {
     const result = await runReview({ changeSet: makeChangeSet(), config: withReviewers([reviewer()]) }, { generate });
     expect(result.status).toBe("completed");
     expect(result.warnings.some((w) => w.startsWith("Custom reviewer API contracts on pass 1 failed"))).toBe(true);
+  });
+
+  it("drops what the reviewer found in a pass whose general pass failed, and says so", async () => {
+    const { generate } = fakeModel({
+      code_review: (request: GenerateRequest<unknown>) =>
+        reviewerOf(request)
+          ? { findings: [modelFinding({ title: "Found anyway" })] }
+          : new ModelCallError("overloaded", [{ model: "anthropic/x", inputTokens: 900, outputTokens: 0, latencyMs: 4 }]),
+    });
+    const result = await runReview({ changeSet: makeChangeSet(), config: withReviewers([reviewer()]) }, { generate });
+    expect(result.findings).toEqual([]);
+    expect(result.warnings).toContain("1 custom reviewer finding was dropped with files whose review pass failed");
   });
 });
 
