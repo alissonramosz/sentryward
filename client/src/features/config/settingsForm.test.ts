@@ -549,6 +549,8 @@ describe("custom reviewers", () => {
   it("derives an id from a name", () => {
     expect(reviewerIdFrom("API contracts")).toBe("api-contracts")
     expect(reviewerIdFrom("  --Docs & Tests!")).toBe("docs-tests")
+    // Cut at 64 characters, then trimmed again so the cut never ends on a separator.
+    expect(reviewerIdFrom(`${"a".repeat(63)} tail`)).toBe("a".repeat(63))
   })
 
   it("marks incomplete rows, reserved ids and bad limits", () => {

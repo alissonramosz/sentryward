@@ -90,9 +90,12 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
 // its jobs were cancelled. FOR SHARE waits for a turn-off in flight (each one
 // updates the row and cancels its jobs in one transaction) and then reads the
 // new state; a turn-off that starts after it waits for this insert and then
-// cancels it with the rest.
+// cancels it with the rest. The change's lock comes first, like every other
+// enqueue, so a close cancelling the change's queued jobs cannot miss a trial
+// being queued at the same moment.
 export async function enqueueTrial(input: TrialInput): Promise<ReviewJob> {
   return prisma.$transaction(async (tx) => {
+    await lockEnqueue(tx, input.repositoryId, input.number);
     const [repo] = await tx.$queryRaw<{ enabled: boolean }[]>`
       SELECT enabled FROM repositories WHERE id = ${input.repositoryId}::uuid FOR SHARE`;
     if (!repo?.enabled) {

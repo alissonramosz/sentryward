@@ -334,8 +334,8 @@ export function reviewerIdFrom(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9_.-]+/g, "-")
     .replace(/^[^a-z0-9]+/, "")
-    .replace(/-+$/, "")
     .slice(0, 64)
+    .replace(/[^a-z0-9]+$/, "")
 }
 
 let lastReviewerKey = 0
