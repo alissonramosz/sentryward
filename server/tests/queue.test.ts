@@ -20,6 +20,7 @@ import {
   recordTitle,
   recoverStale,
   releaseLease,
+  RepositoryDisabledError,
   requeueInterrupted,
 } from "../src/worker/queue.ts";
 
@@ -395,6 +396,48 @@ describe("cancelForDisabledRepositories", () => {
       status: "cancelled",
       error: "Sentryward lost access to this repository",
     });
+  });
+});
+
+describe("enqueueTrial", () => {
+  it("refuses a repository that is turned off", async () => {
+    await prisma.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
+
+    await expect(trial("aaa")).rejects.toBeInstanceOf(RepositoryDisabledError);
+    expect(await prisma.reviewJob.count()).toBe(0);
+  });
+
+  it("waits for a turn-off in flight and then refuses", async () => {
+    let queueing!: Promise<unknown>;
+    await prisma.$transaction(async (tx) => {
+      await tx.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
+      await cancelForDisabledRepositories([repositoryId], DISABLED_REASON, tx);
+      queueing = trial("aaa").catch((err: unknown) => err);
+      // Long enough for the trial to reach the row lock before the turn-off commits.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+
+    expect(await queueing).toBeInstanceOf(RepositoryDisabledError);
+    expect(await prisma.reviewJob.count()).toBe(0);
+  });
+
+  it("is cancelled by a turn-off that starts while it is being queued", async () => {
+    let disabling!: Promise<number>;
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${repositoryId}::uuid FOR SHARE`;
+      await tx.reviewJob.create({
+        data: { repositoryId, number: 7, headSha: "aaa", trigger: "manual", trial: true, trialReviewer: {} },
+      });
+      disabling = prisma.$transaction(async (other) => {
+        await other.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
+        return cancelForDisabledRepositories([repositoryId], DISABLED_REASON, other);
+      });
+      // Long enough for the turn-off to reach the row lock before this trial commits.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+
+    expect(await disabling).toBe(1);
+    expect(await prisma.reviewJob.findFirstOrThrow()).toMatchObject({ status: "cancelled", error: DISABLED_REASON });
   });
 });
 

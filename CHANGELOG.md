@@ -31,7 +31,8 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   previous verdict or the backlog's source, and are left out of the change
   view and review stats; re-running one tries the same draft. The config a
   trial stores keeps only the draft's id and name, since every member can
-  read it.
+  read it. A trial queued while its repository is being turned off is refused
+  (409) rather than left queued.
 
 - Deep review (`review.deep`). Off by default; when on, every review pass of a
   change is reviewed again by up to seven specialists (`naming`,

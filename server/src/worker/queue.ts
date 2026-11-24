@@ -84,17 +84,38 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
 // throw away a trial someone is waiting on. The change's lease still runs the
 // two one at a time. Each request is its own trial (drafts differ), so there
 // is no duplicate check either.
+//
+// The caller checks the repository is on before a forge request, so a
+// repository turned off during that request would otherwise get a trial after
+// its jobs were cancelled. FOR SHARE waits for a turn-off in flight (each one
+// updates the row and cancels its jobs in one transaction) and then reads the
+// new state; a turn-off that starts after it waits for this insert and then
+// cancels it with the rest.
 export async function enqueueTrial(input: TrialInput): Promise<ReviewJob> {
-  return prisma.reviewJob.create({
-    data: {
-      repositoryId: input.repositoryId,
-      number: input.number,
-      headSha: input.headSha,
-      trigger: "manual",
-      trial: true,
-      trialReviewer: input.reviewer,
-    },
+  return prisma.$transaction(async (tx) => {
+    const [repo] = await tx.$queryRaw<{ enabled: boolean }[]>`
+      SELECT enabled FROM repositories WHERE id = ${input.repositoryId}::uuid FOR SHARE`;
+    if (!repo?.enabled) {
+      throw new RepositoryDisabledError();
+    }
+    return tx.reviewJob.create({
+      data: {
+        repositoryId: input.repositoryId,
+        number: input.number,
+        headSha: input.headSha,
+        trigger: "manual",
+        trial: true,
+        trialReviewer: input.reviewer,
+      },
+    });
   });
+}
+
+export class RepositoryDisabledError extends Error {
+  constructor() {
+    super("Reviews are turned off for this repository");
+    this.name = "RepositoryDisabledError";
+  }
 }
 
 // The caller holds the change's lock and has checked the head is not queued.

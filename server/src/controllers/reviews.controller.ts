@@ -17,7 +17,7 @@ import { adapterForConnection, toHttpError } from "../services/forge.ts";
 import { errorKind } from "../services/reviewErrors.ts";
 import { requireRole } from "../services/workspaces.ts";
 import { digestTotals } from "../services/usage.ts";
-import { cancelJob, enqueue, enqueueTrial } from "../worker/queue.ts";
+import { cancelJob, enqueue, enqueueTrial, RepositoryDisabledError } from "../worker/queue.ts";
 import { customReviewerSchema, type CustomReviewer } from "../review/config/schema.ts";
 import {
   createReviewByRepoSchema,
@@ -559,6 +559,10 @@ async function queueTrial(res: Response, repo: RepoWithConnection, number: numbe
     headSha: head.headSha,
     // Always on for its own trial, whatever the draft's switch says.
     reviewer: { ...reviewer, enabled: true },
+  }).catch((err: unknown) => {
+    // Turned off while the head was being fetched.
+    if (err instanceof RepositoryDisabledError) throw new HttpError(409, `Reviews are turned off for ${repo.fullPath}`);
+    throw err;
   });
   const review = await prisma.reviewJob.findUniqueOrThrow({ where: { id: job.id }, select: listFields });
   res.status(202).json({ review });
