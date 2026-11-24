@@ -428,8 +428,8 @@ describe("enqueueTrial", () => {
       await tx.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
       await cancelForDisabledRepositories([repositoryId], DISABLED_REASON, tx);
       queueing = trial("aaa").catch((err: unknown) => err);
-      // Long enough for the trial to reach the row lock before the turn-off commits.
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Prove the trial reached the repository lock before the turn-off commits.
+      await waitForLockWaiters(1);
     });
 
     expect(await queueing).toBeInstanceOf(RepositoryDisabledError);

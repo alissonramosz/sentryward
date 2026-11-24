@@ -307,7 +307,6 @@ export function validateFindings(
   return { findings: capped.findings, dropped, demoted, noopStripped };
 }
 
-// The first `max` of findings already sorted by compareFindings.
 // At most a custom reviewer's maxFindings of its findings, the most severe
 // first; findings arrive sorted by compareFindings, so the first ones are kept.
 // Applied before the review-wide cap, so one chatty reviewer cannot use up
@@ -332,6 +331,7 @@ export function capPerReviewer(
   return { findings: kept, overLimit: findings.length - kept.length };
 }
 
+// The first `max` of findings already sorted by compareFindings.
 export function capFindings(findings: Finding[], max: number): { findings: Finding[]; overLimit: number } {
   return { findings: findings.slice(0, max), overLimit: Math.max(0, findings.length - max) };
 }
