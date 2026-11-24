@@ -18,13 +18,16 @@ export interface ProgressRecorder {
 // decide whether the pipeline and runJob report verifying and publishing.
 // The worker always gives the pipeline a context source, so claim checks run
 // whenever they are on.
-export function reviewSteps(config: Config): ReviewStep[] {
+// `publishing` overrides what the config says for a run that posts nothing
+// whatever its settings (a trial), so it is not shown a step it never reaches.
+export function reviewSteps(config: Config, options: { publishing?: boolean } = {}): ReviewStep[] {
+  const publishing = options.publishing ?? publishes(config);
   return [
     "fetching",
     "preparing",
     "reviewing",
     ...(checksFindings(config) ? (["verifying"] as const) : []),
-    ...(publishes(config) ? (["publishing"] as const) : []),
+    ...(publishing ? (["publishing"] as const) : []),
   ];
 }
 

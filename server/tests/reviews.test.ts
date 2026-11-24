@@ -10,7 +10,7 @@ import { toMarkdown } from "../src/review/render/markdown.ts";
 import { claimNext, recordTitle } from "../src/worker/queue.ts";
 import { fetchStub } from "./helpers/fetchStub.ts";
 import { sampleResult } from "./helpers/result.ts";
-import { createTeam, createUser, inWorkspace } from "./helpers/users.ts";
+import { addMember, createTeam, createUser, inWorkspace } from "./helpers/users.ts";
 
 let cookie: string;
 let repoId: string;
@@ -471,6 +471,19 @@ describe("GET /api/reviews/attention", () => {
 
     const other = await createUser("other@example.com");
     expect((await request(app).get("/api/reviews/attention").set("Cookie", other.cookie)).body.failed).toBe(0);
+  });
+
+  it("leaves trials out: a failed one is not counted and a later one hides nothing", async () => {
+    await prisma.reviewJob.createMany({
+      data: [
+        { ...failedRun(1, ago(60_000)), trial: true },
+        { ...failedRun(2, ago(3_600_000)), createdAt: ago(3_700_000) },
+        { ...failedRun(2, ago(60_000), "completed"), trial: true, createdAt: ago(120_000) },
+      ],
+    });
+
+    const res = await request(app).get("/api/reviews/attention").set("Cookie", cookie);
+    expect(res.body.failed).toBe(1);
   });
 
   it("only counts runs that failed after the last visit, per workspace", async () => {
@@ -948,5 +961,96 @@ describe("GET /api/reviews/:id/change", () => {
     const res = await request(app).get(`/api/reviews/${created.id}/change`).set("Cookie", other.cookie);
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /api/reviews/trial", () => {
+  const reviewer = { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change without a version bump." };
+
+  it("queues a trial at the change's head, kept out of the change view and the stats", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+    const done = await completedJob();
+    const statsBefore = (await request(app).get("/api/reviews/stats").set("Cookie", cookie)).body;
+
+    const res = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ repoId, number: 7, reviewer });
+    expect(res.status).toBe(202);
+    expect(res.body.review).toMatchObject({ trial: true, headSha: "abc123" });
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: res.body.review.id } })).toMatchObject({
+      trial: true,
+      trialReviewer: reviewer,
+    });
+
+    // Finished the way the worker finishes a run, with a verdict, a duration
+    // and the completed review's usage, so the stats would count it if they
+    // counted trials.
+    await prisma.reviewJob.update({
+      where: { id: res.body.review.id },
+      data: {
+        status: "completed",
+        verdict: "blocked",
+        startedAt: new Date(Date.now() - 60_000),
+        finishedAt: new Date(),
+        summary: done.summary as object,
+      },
+    });
+    const stats = await request(app).get("/api/reviews/stats").set("Cookie", cookie);
+    expect(stats.body).toEqual(statsBefore);
+
+    const changes = await request(app).get("/api/reviews?view=changes").set("Cookie", cookie);
+    expect(changes.body.total).toBe(1);
+    expect(changes.body.reviews[0].trial).toBe(false);
+    const runs = await request(app).get("/api/reviews").set("Cookie", cookie);
+    expect(runs.body.total).toBe(2);
+
+    // A re-run tries the same draft again.
+    const rerun = await request(app).post(`/api/reviews/${res.body.review.id}/rerun`).set("Cookie", cookie);
+    expect(rerun.status).toBe(202);
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: rerun.body.review.id } })).toMatchObject({ trial: true, trialReviewer: reviewer });
+  });
+
+  it("names the change by its URL too, and asks for one when neither is given", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+    const byUrl = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ url: MR_URL, reviewer });
+    expect(byUrl.status).toBe(202);
+    expect(byUrl.body.review).toMatchObject({ trial: true, number: 7 });
+    const neither = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ reviewer });
+    expect(neither.status).toBe(400);
+    expect(neither.body.errors).toHaveProperty("url");
+  });
+
+  it("refuses a reviewer the settings would refuse", async () => {
+    const res = await request(app)
+      .post("/api/reviews/trial")
+      .set("Cookie", cookie)
+      .send({ repoId, number: 7, reviewer: { ...reviewer, id: "tests" } });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toHaveProperty("reviewer");
+  });
+
+  it("is for settings editors only", async () => {
+    vi.stubGlobal("fetch", fetchStub([mrRoute("abc123")]).fetch);
+    const started = await request(app).post("/api/reviews/trial").set("Cookie", cookie).send({ repoId, number: 7, reviewer });
+    expect(started.status).toBe(202);
+    const owner = await createUser("owner@example.com");
+    const team = await createTeam(owner.user.id);
+    const repo = await prisma.repository.findUniqueOrThrow({ where: { id: repoId } });
+    await prisma.forgeConnection.update({ where: { id: repo.connectionId }, data: { workspaceId: team.id } });
+    const me = await prisma.user.findFirstOrThrow({ where: { email: "dev@example.com" } });
+    await addMember(team.id, me.id, "member");
+
+    const res = await request(app)
+      .post("/api/reviews/trial")
+      .set("Cookie", cookie)
+      .set(...inWorkspace(team.id))
+      .send({ repoId, number: 7, reviewer });
+    expect(res.status).toBe(403);
+
+    // A member sees the trial, but not the draft as it was sent, and cannot run it again.
+    const detail = await request(app).get(`/api/reviews/${started.body.review.id}`).set("Cookie", cookie).set(...inWorkspace(team.id));
+    expect(detail.status).toBe(200);
+    expect(detail.body.review.trial).toBe(true);
+    expect(detail.body.review).not.toHaveProperty("trialReviewer");
+    const rerun = await request(app).post(`/api/reviews/${started.body.review.id}/rerun`).set("Cookie", cookie).set(...inWorkspace(team.id));
+    expect(rerun.status).toBe(403);
   });
 });

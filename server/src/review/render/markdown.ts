@@ -132,6 +132,12 @@ export function ruleSuffix(finding: Finding): string {
   return finding.source === "rule" && finding.ruleId ? labelSuffix("rule", finding.ruleId) : "";
 }
 
+// Names the custom reviewer behind a finding. The name is the team's own text,
+// so it is escaped like a tool name. Specialists stay unnamed on the forge.
+export function reviewerSuffix(finding: Finding): string {
+  return finding.reviewerName ? labelSuffix("reviewer", finding.reviewerName) : "";
+}
+
 // Only an outcome is worth a word: "not checked" on every finding would be
 // noise whenever review.verify is off.
 export function verificationSuffix(finding: Finding): string {
@@ -358,7 +364,7 @@ function findingDetail(finding: Finding): string[] {
   const lines = [
     `#### ${location(finding)}: ${inline(finding.title)}`,
     "",
-    `${SEVERITY_ICON[finding.severity]} *${finding.severity} · ${finding.category} · ${finding.kind.replace(/_/g, " ")}${toolSuffix(finding)}${ruleSuffix(finding)}${verificationSuffix(finding)}*`,
+    `${SEVERITY_ICON[finding.severity]} *${finding.severity} · ${finding.category} · ${finding.kind.replace(/_/g, " ")}${toolSuffix(finding)}${ruleSuffix(finding)}${reviewerSuffix(finding)}${verificationSuffix(finding)}*`,
     "",
     sanitize(finding.body),
     ...impactLines(finding),

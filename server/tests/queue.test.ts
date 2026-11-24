@@ -12,6 +12,7 @@ import {
   complete,
   enqueue,
   enqueueFromWebhook,
+  enqueueTrial,
   fail,
   DISABLED_REASON,
   heartbeat,
@@ -19,6 +20,7 @@ import {
   recordTitle,
   recoverStale,
   releaseLease,
+  RepositoryDisabledError,
   requeueInterrupted,
 } from "../src/worker/queue.ts";
 
@@ -58,6 +60,24 @@ afterAll(async () => {
 
 const job = (headSha: string, number = 7) =>
   enqueue({ repositoryId, number, headSha, trigger: "webhook" });
+
+const trial = (headSha: string, number = 7) =>
+  enqueueTrial({ repositoryId, number, headSha, reviewer: { id: "draft", name: "Draft", instructions: "Look for draft issues." } });
+
+// Waits until this many other sessions are blocked on a lock, so a race test
+// can order its steps by what each one is waiting for rather than by sleeping.
+// Test files run one at a time, so no other session is holding locks here.
+async function waitForLockWaiters(count: number): Promise<void> {
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    const [{ waiting }] = await prisma.$queryRaw<{ waiting: number }[]>`
+      SELECT count(*)::int AS waiting FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+    if (waiting >= count) return;
+    if (Date.now() > deadline) throw new Error(`Expected ${count} sessions waiting on a lock, saw ${waiting}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 const HOUR_AGO = () => new Date(Date.now() - 60 * 60 * 1000);
 const expireLease = (id: string) => prisma.reviewJob.update({ where: { id }, data: { leaseExpiresAt: HOUR_AGO() } });
@@ -394,6 +414,53 @@ describe("cancelForDisabledRepositories", () => {
   });
 });
 
+describe("enqueueTrial", () => {
+  it("refuses a repository that is turned off", async () => {
+    await prisma.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
+
+    await expect(trial("aaa")).rejects.toBeInstanceOf(RepositoryDisabledError);
+    expect(await prisma.reviewJob.count()).toBe(0);
+  });
+
+  it("waits for a turn-off in flight and then refuses", async () => {
+    let queueing!: Promise<unknown>;
+    await prisma.$transaction(async (tx) => {
+      await tx.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
+      await cancelForDisabledRepositories([repositoryId], DISABLED_REASON, tx);
+      queueing = trial("aaa").catch((err: unknown) => err);
+      // Prove the trial reached the repository lock before the turn-off commits.
+      await waitForLockWaiters(1);
+    });
+
+    expect(await queueing).toBeInstanceOf(RepositoryDisabledError);
+    expect(await prisma.reviewJob.count()).toBe(0);
+  });
+
+  it("is cancelled by a turn-off that starts while it is being queued", async () => {
+    let queueing!: Promise<unknown>;
+    let disabling!: Promise<number>;
+    // Holding review_jobs in SHARE mode stops the real enqueueTrial at its
+    // insert, after it has checked the repository and taken its share lock. The
+    // turn-off then has to wait on that lock; it only waits if enqueueTrial
+    // took it, so a missing lock times out below instead of passing.
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`LOCK TABLE review_jobs IN SHARE MODE`;
+      queueing = trial("aaa");
+      await waitForLockWaiters(1);
+      disabling = prisma.$transaction(async (other) => {
+        await other.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
+        return cancelForDisabledRepositories([repositoryId], DISABLED_REASON, other);
+      });
+      await waitForLockWaiters(2);
+    });
+
+    const queued = await queueing;
+    expect(queued).toMatchObject({ trial: true });
+    expect(await disabling).toBe(1);
+    expect(await prisma.reviewJob.findFirstOrThrow()).toMatchObject({ status: "cancelled", error: DISABLED_REASON });
+  });
+});
+
 describe("cancelQueuedForClosedChange", () => {
   it("cancels a push being queued at the same moment", async () => {
     const repo = await prisma.repository.findUniqueOrThrow({ where: { id: repositoryId } });
@@ -458,6 +525,26 @@ describe("recoverStale", () => {
       lockedAt: null,
     });
     expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: newer.id } })).status).toBe("queued");
+  });
+
+  it("requeues a stale trial even when a newer review of its change is queued", async () => {
+    const stale = await trial("aaa");
+    await claimNext();
+    await prisma.reviewJob.update({ where: { id: stale.id }, data: { lockedAt: HOUR_AGO() } });
+    await job("bbb");
+
+    expect((await recoverStale(15 * 60 * 1000, 3)).count).toBe(1);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: stale.id } })).status).toBe("queued");
+  });
+
+  it("requeues a stale review when only a newer trial of its change is queued", async () => {
+    const stale = await job("aaa");
+    await claimNext();
+    await prisma.reviewJob.update({ where: { id: stale.id }, data: { lockedAt: HOUR_AGO() } });
+    await trial("bbb");
+
+    expect((await recoverStale(15 * 60 * 1000, 3)).count).toBe(1);
+    expect((await prisma.reviewJob.findUniqueOrThrow({ where: { id: stale.id } })).status).toBe("queued");
   });
 
   it("requeues a stale job with attempts left and fails one without", async () => {
@@ -536,6 +623,18 @@ describe("requeueInterrupted", () => {
     expect(await claimNext()).toBeNull();
     await expireLease(older.id);
     expect((await claimNext())?.id).toBe(newer.id);
+  });
+
+  it("hands back a trial even when its change has a newer review", async () => {
+    const interrupted = await trial("aaa");
+    await claimNext();
+    await job("bbb");
+
+    expect(await requeueInterrupted([{ id: interrupted.id, attempts: 1 }])).toBe(1);
+    expect(await prisma.reviewJob.findUniqueOrThrow({ where: { id: interrupted.id } })).toMatchObject({
+      status: "queued",
+      attempts: 0,
+    });
   });
 
   it("an abandoned run cannot extend the hand-back lease", async () => {
@@ -697,6 +796,26 @@ describe("claimState", () => {
     expect(await claimState(claimed.id, claimed.attempts)).toBe("lost");
   });
 
+  it("keeps a trial owned once a newer review of its change has started", async () => {
+    await trial("aaa");
+    const claimed = (await claimNext())!;
+    await expireLease(claimed.id);
+    await job("bbb");
+    await claimNext();
+
+    expect(await claimState(claimed.id, claimed.attempts)).toBe("owned");
+  });
+
+  it("keeps a review owned once a newer trial of its change has started", async () => {
+    await job("aaa");
+    const claimed = (await claimNext())!;
+    await expireLease(claimed.id);
+    await trial("bbb");
+    expect((await claimNext())?.trial).toBe(true);
+
+    expect(await claimState(claimed.id, claimed.attempts)).toBe("owned");
+  });
+
   it("stays owned while a newer job for the change only waits", async () => {
     await job("aaa");
     const claimed = (await claimNext())!;
@@ -827,6 +946,13 @@ describe("enqueueFromWebhook", () => {
     expect(await enqueueFromWebhook({ repositoryId, number: 99, headSha: "z", trigger: "webhook" })).toEqual({
       queued: false,
       reason: "queue_full",
+    });
+  });
+
+  it("does not count queued trials toward the queue cap", async () => {
+    for (let n = 1; n <= 10; n++) await trial(`t${n}`, 5);
+    expect(await enqueueFromWebhook({ repositoryId, number: 99, headSha: "z", trigger: "webhook" })).toMatchObject({
+      queued: true,
     });
   });
 });

@@ -2357,3 +2357,69 @@ describe("folder settings", () => {
     expect(await screen.findByRole("button", { name: "Add folder" })).toBeDisabled()
   })
 })
+
+describe("Custom reviewers", { timeout: 20_000 }, () => {
+  it("adds a reviewer to the global config, deriving its id, and tries it on a change", async () => {
+    let body: unknown
+    let trial: unknown
+    mockApi(
+      globalRoutes({
+        "GET /api/config/global": globalConfig({ llm: { connection: "openai" } }),
+        "PUT /api/config/global": (init?: RequestInit) => {
+          body = JSON.parse(String(init?.body))
+          return jsonResponse(200, globalConfig((body as { settings: Record<string, unknown> }).settings))
+        },
+        "POST /api/reviews/trial": (init?: RequestInit) => {
+          trial = JSON.parse(String(init?.body))
+          return jsonResponse(202, { review: { id: "trial-1", trial: true } })
+        },
+      }),
+    )
+    renderWithProviders(<App />, { route: "/configuration?tab=guidance" })
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add reviewer" }))
+    await userEvent.type(screen.getByLabelText("Name"), "API contracts")
+    expect(screen.getByLabelText("Id")).toHaveValue("api-contracts")
+    // Not complete yet, so not ready to try.
+    await userEvent.type(screen.getByLabelText("Try on a pull or merge request"), "https://github.com/acme/web/pull/42")
+    expect(screen.getByRole("button", { name: "Try it" })).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Save global config" })).toBeDisabled()
+
+    await userEvent.type(screen.getByLabelText("Looks for"), "Response shapes that change.")
+    await userEvent.type(screen.getByLabelText("Finding limit"), "3")
+    await userEvent.click(screen.getByRole("button", { name: "Try it" }))
+    expect(await screen.findByRole("link", { name: "Open the trial" })).toHaveAttribute("href", "/reviews/trial-1")
+    expect(trial).toEqual({
+      url: "https://github.com/acme/web/pull/42",
+      reviewer: { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change.", maxFindings: 3 },
+    })
+
+    await userEvent.click(screen.getByRole("button", { name: "Save global config" }))
+    await waitFor(() =>
+      expect(body).toEqual({
+        revision: "g1",
+        settings: {
+          llm: { connection: "openai" },
+          reviewers: [{ id: "api-contracts", name: "API contracts", instructions: "Response shapes that change.", maxFindings: 3 }],
+        },
+      }),
+    )
+  })
+
+  it("keeps each reviewer's trial with it when one above is removed", async () => {
+    const reviewers = [
+      { id: "docs", name: "Docs", instructions: "Public API without docs." },
+      { id: "api-contracts", name: "API contracts", instructions: "Response shapes that change." },
+    ]
+    mockApi(globalRoutes({ "GET /api/config/global": globalConfig({ llm: { connection: "openai" }, reviewers }) }))
+    renderWithProviders(<App />, { route: "/configuration?tab=guidance" })
+
+    await screen.findByRole("button", { name: "Remove reviewer 2" })
+    const [, second] = screen.getAllByLabelText("Try on a pull or merge request")
+    await userEvent.type(second!, "https://github.com/acme/web/pull/7")
+    await userEvent.click(screen.getByRole("button", { name: "Remove reviewer 1" }))
+
+    expect(screen.getByLabelText("Name")).toHaveValue("API contracts")
+    expect(screen.getByLabelText("Try on a pull or merge request")).toHaveValue("https://github.com/acme/web/pull/7")
+  })
+})

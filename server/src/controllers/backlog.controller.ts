@@ -145,7 +145,7 @@ export async function getBacklogItem(req: Request, res: Response) {
   }
   // The review that last spoke for the source change, if retention kept it.
   const sourceReview = await prisma.reviewJob.findFirst({
-    where: { repositoryId: item.repository.id, number: item.sourceNumber, status: { in: ["completed", "partial"] } },
+    where: { repositoryId: item.repository.id, number: item.sourceNumber, status: { in: ["completed", "partial"] }, trial: false },
     orderBy: { createdAt: "desc" },
     select: { id: true },
   });

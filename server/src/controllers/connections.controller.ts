@@ -98,7 +98,9 @@ const RECENT_REVIEWS = 5;
 export async function getConnection(req: Request, res: Response) {
   const connection = await loadWorkspaceConnection(req.workspaceId!, String(req.params.id));
   const provider = providerFor(connection.provider);
-  const reviewScope = { repository: { connectionId: connection.id } };
+  // A trial never speaks for its change, so it is not one of the
+  // connection's reviews.
+  const reviewScope = { repository: { connectionId: connection.id }, trial: false };
 
   const [repositories, total, recent] = await Promise.all([
     prisma.repository.findMany({

@@ -27,6 +27,18 @@ export interface Rule {
   bad?: string
 }
 
+// A team-defined reviewer; mirrors customReviewerSchema in
+// server/src/review/config/schema.ts.
+export interface CustomReviewer {
+  id: string
+  name: string
+  instructions: string
+  paths?: string[]
+  severityFloor?: string
+  maxFindings?: number
+  enabled?: boolean
+}
+
 // A partial review config; mirrors server/src/review/config/schema.ts.
 // Whether a repository's own saved settings apply instead of the global
 // config. Shared by the Repositories cards and the Configuration picker so the
@@ -127,6 +139,8 @@ export interface ConfigOverride {
   languageInstructions?: Record<string, string>
   // Added to the rules of the layers below; never replaces one of them.
   rules?: Rule[]
+  // Combined across layers like rules.
+  reviewers?: CustomReviewer[]
   [key: string]: unknown
 }
 
@@ -221,6 +235,9 @@ export interface EffectiveConfig {
   languageInstructions: Record<string, string>
   // Every layer's rules combined; sources["rules.<id>"] names each one's layer.
   rules: Rule[]
+  // The same for custom reviewers (sources["reviewers.<id>"]). Optional: a
+  // server from before custom reviewers does not send it.
+  reviewers?: CustomReviewer[]
 }
 
 // What a review of a repository's default branch would run with.

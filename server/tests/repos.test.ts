@@ -150,6 +150,10 @@ describe("repository order and latest review", () => {
     const newest = await job("running", 2, "2026-01-02");
     await job("skipped", 3, "2026-01-03");
     await job("superseded", 4, "2026-01-04");
+    // A trial never speaks for its change, so it is not the latest review.
+    await prisma.reviewJob.create({
+      data: { repositoryId: api.id, number: 1, headSha: "h", trigger: "manual", status: "completed", trial: true, createdAt: new Date("2026-01-05") },
+    });
 
     const res = await request(app).get("/api/repos/last-reviews").set("Cookie", cookie);
 
@@ -753,6 +757,52 @@ describe("GET and PUT /api/config/global", () => {
       .set("Cookie", cookie)
       .send({ settings: { rules: [...own, ...own] }, settingsRevision: await repoRevision(repo.id) });
     expect(duplicate.status).toBe(400);
+  });
+
+  it("refuses a repository custom reviewer whose id the global settings already use", async () => {
+    const reviewer = { id: "api", name: "API", instructions: "Response shapes." };
+    const global = await request(app)
+      .put("/api/config/global")
+      .set("Cookie", cookie)
+      .send({ settings: { llm: { connection: "openai" }, reviewers: [reviewer] }, revision: await globalRevision() });
+    expect(global.status).toBe(200);
+
+    const repo = await prisma.repository.create({
+      data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/reviewers", externalId: "11", defaultBranch: "main", followGlobal: false },
+    });
+    const clash = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: { reviewers: [{ ...reviewer, name: "Looser" }] }, settingsRevision: await repoRevision(repo.id) });
+    expect(clash.status).toBe(400);
+    expect(clash.body.errors).toEqual({
+      reviewers: ["Custom reviewer api in the repository settings was ignored: a custom reviewer with that id is already set in the global config"],
+    });
+  });
+
+  it("warns about a repository custom reviewer a later global reviewer leaves out", async () => {
+    const reviewer = { id: "api", name: "API", instructions: "Response shapes." };
+    // A repository with reviewers but no rules, so only its reviewers get it
+    // checked against the global settings.
+    const repo = await prisma.repository.create({
+      data: { connectionId, provider: "gitlab", host: "gitlab.com", fullPath: "team/later", externalId: "12", defaultBranch: "main", followGlobal: false },
+    });
+    const saved = await request(app)
+      .patch(`/api/repos/${repo.id}`)
+      .set("Cookie", cookie)
+      .send({ settings: { reviewers: [reviewer] }, settingsRevision: await repoRevision(repo.id) });
+    expect(saved.status).toBe(200);
+
+    const global = await request(app)
+      .put("/api/config/global")
+      .set("Cookie", cookie)
+      .send({ settings: { llm: { connection: "openai" }, reviewers: [{ ...reviewer, name: "Global API" }] }, revision: await globalRevision() });
+    expect(global.status).toBe(200);
+    const warning =
+      "team/later: Custom reviewer api in the repository settings was ignored: a custom reviewer with that id is already set in the global config";
+    expect(global.body.warnings).toEqual([warning]);
+    const read = await request(app).get("/api/config/global").set("Cookie", cookie);
+    expect(read.body.warnings).toEqual([warning]);
   });
 
   it("refuses repository rules the global rules would leave out, and warns when global rules grow", async () => {

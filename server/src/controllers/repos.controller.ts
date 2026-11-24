@@ -4,8 +4,9 @@ import { HttpError } from "../lib/httpError.ts";
 import { prisma } from "../lib/prisma.ts";
 import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevision.ts";
 import { dropRepositoriesFromTargets } from "../services/notifications.ts";
-import { loadReviewConfig, repoSettingsRuleIssues, resolveDashboardLayers } from "../review/config/load.ts";
+import { loadReviewConfig, repoSettingsCombinedIssues, resolveDashboardLayers } from "../review/config/load.ts";
 import { directorySettingsSchema, normalizeDirectory, type DashboardOverride, type DirectorySetting } from "../review/config/schema.ts";
+import type { CombinedIssue } from "../review/config/resolve.ts";
 import { hostOrigin } from "../review/forge/types.ts";
 import { adapterForConnection, loadWorkspaceConnection, toHttpError } from "../services/forge.ts";
 import { requireStoredLlmConnection } from "../services/llm.ts";
@@ -92,13 +93,14 @@ interface LatestReviewRow {
 
 // Each repository's newest review in one query, rather than a nested include
 // that would load every job. Skipped runs reviewed nothing and superseded ones
-// were replaced by a newer run, so neither counts.
+// were replaced by a newer run, so neither counts; a trial never speaks for
+// its change, so it is not a repository's latest review either.
 async function latestReviews(repositoryIds: string[]) {
   if (!repositoryIds.length) return new Map();
   const rows = await prisma.$queryRaw<LatestReviewRow[]>(Prisma.sql`
     SELECT DISTINCT ON (repository_id) id, repository_id, number, status, verdict, created_at
     FROM review_jobs
-    WHERE repository_id = ANY(${repositoryIds}::uuid[]) AND status NOT IN ('skipped', 'superseded')
+    WHERE repository_id = ANY(${repositoryIds}::uuid[]) AND status NOT IN ('skipped', 'superseded') AND trial = false
     ORDER BY repository_id, created_at DESC`);
   return new Map(
     rows.map((row) => [
@@ -237,11 +239,11 @@ export async function updateRepo(req: Request, res: Response) {
         if (revision !== settingsRevision(saved.settings)) {
           throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
         }
-        requireRepoSettingsRules(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
+        requireRepoSettingsLists(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
       } else if (followGlobal === false && saved.followGlobal) {
         // Leaving the global settings activates the saved ones, read under the
         // row lock, so they are checked as a save of them would be.
-        requireRepoSettingsRules(globalSettings, saved, saved.settings, false);
+        requireRepoSettingsLists(globalSettings, saved, saved.settings, false);
       }
     }
     const row = await tx.repository.update({
@@ -272,27 +274,39 @@ async function lockForRules(tx: Prisma.TransactionClient, workspaceId: string, i
   return workspace?.review_settings;
 }
 
-// Repository rules the layers below would leave out are refused, and so are
-// folder rules these settings would newly push out (a repository rule taking
-// a folder rule's id, or the combined limit), since the folder would otherwise
-// lose them with only a review warning. A folder that was already broken
+// Repository rules and custom reviewers the layers below would leave out are
+// refused, and so are folder ones these settings would newly push out (a
+// repository entry taking a folder entry's id, or a combined limit), since the
+// folder would otherwise lose them with only a review warning. A folder that was already broken
 // before this save stays a warning, so it does not block unrelated edits.
-export function requireRepoSettingsRules(
+// `lists` limits the check to the lists a save changes: a rule approval only
+// adds a rule, so a reviewer clash it did not cause must not refuse it.
+export function requireRepoSettingsLists(
   globalSettings: unknown,
   saved: { settings: unknown; directories: unknown },
   settings: unknown,
   followGlobal: boolean,
+  lists?: CombinedIssue["list"][],
 ) {
-  const after = repoSettingsRuleIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal });
+  const after = repoSettingsCombinedIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal })
+    .filter((issue) => !lists || lists.includes(issue.list));
   if (!after.length) return;
   const key = (issue: { directory?: number; message: string }) => `${issue.directory}:${issue.message}`;
   const before = new Set(
-    repoSettingsRuleIssues({ globalSettings, repoSettings: saved.settings, directories: saved.directories, followGlobal: false })
+    repoSettingsCombinedIssues({ globalSettings, repoSettings: saved.settings, directories: saved.directories, followGlobal: false })
       .filter((issue) => issue.directory !== undefined)
       .map(key),
   );
   const issues = after.filter((issue) => issue.directory === undefined || !before.has(key(issue)));
-  if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
+  if (issues.length) throw new HttpError(400, "Validation failed", combinedIssueErrors(issues));
+}
+
+// Field errors for refused rules and custom reviewers, each under its own
+// field so the form shows it next to the list at fault.
+function combinedIssueErrors(issues: { list: "rules" | "reviewers"; message: string }[]): Record<string, string[]> {
+  const errors: Record<string, string[]> = {};
+  for (const issue of issues) (errors[issue.list] ??= []).push(issue.message);
+  return errors;
 }
 
 // A chosen LLM connection must be one the workspace has stored.
@@ -333,13 +347,13 @@ async function changeDirectories(
     }
     if (checkRules !== undefined) {
       const index = parsed.data.findIndex((dir) => dir.path === checkRules);
-      const issues = repoSettingsRuleIssues({
+      const issues = repoSettingsCombinedIssues({
         globalSettings,
         repoSettings: row.settings,
         directories: parsed.data,
         followGlobal: row.followGlobal,
       }).filter((issue) => issue.directory === index);
-      if (issues.length) throw new HttpError(400, "Validation failed", { rules: issues.map((issue) => issue.message) });
+      if (issues.length) throw new HttpError(400, "Validation failed", combinedIssueErrors(issues));
     }
     await tx.repository.update({ where: { id }, data: { directories: parsed.data } });
   });

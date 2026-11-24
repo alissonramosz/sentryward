@@ -81,7 +81,11 @@ export async function pruneReviews(
 
 // Raw because Prisma cannot express "not the newest run of its change". Rows
 // with nothing stored (a run that failed before reviewing) are skipped, so they
-// still read as "did not run" rather than as an expired result.
+// still read as "did not run" rather than as an expired result. A trial is never
+// a change's newest run: it never speaks for the change, so one finishing later
+// must not cost the real latest review the result the backlog and incremental
+// reviews build on, and nothing builds on a trial, so it is trimmed like any
+// older run.
 async function trimmableIds(cutoff: Date, batchSize: number, workspaceIds?: string[]): Promise<string[]> {
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     SELECT j.id FROM review_jobs j
@@ -91,11 +95,13 @@ async function trimmableIds(cutoff: Date, batchSize: number, workspaceIds?: stri
       AND (j.result IS NOT NULL OR j.resolved_config IS NOT NULL OR j.publication IS NOT NULL)
       AND NOT (
         j.status IN ('completed', 'partial')
+        AND j.trial = false
         AND NOT EXISTS (
           SELECT 1 FROM review_jobs n
           WHERE n.repository_id = j.repository_id
             AND n.number = j.number
             AND n.status IN ('completed', 'partial')
+            AND n.trial = false
             AND n.finished_at > j.finished_at
         )
       )

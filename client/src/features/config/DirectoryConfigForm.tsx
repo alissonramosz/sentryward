@@ -31,7 +31,7 @@ import { isDirty, toForm, toSettings, validateForm, type FormState } from "./set
 // since the page loaded) under the field they concern.
 function serverError(err: unknown, fallback: string) {
   const fields = err instanceof ApiError ? err.fieldErrors : undefined
-  const fieldError = fields?.directories?.[0] ?? fields?.rules?.[0] ?? fields?.connection?.[0]
+  const fieldError = fields?.directories?.[0] ?? fields?.rules?.[0] ?? fields?.reviewers?.[0] ?? fields?.connection?.[0]
   return fieldError ?? (err instanceof Error ? err.message : fallback)
 }
 
@@ -180,6 +180,7 @@ export function DirectoryConfigForm(props: {
     patternErrors,
     inherited?.config.rules,
     "repoSettings",
+    inherited?.config.reviewers,
   )
   const valid = Object.keys(errors).length === 0
 

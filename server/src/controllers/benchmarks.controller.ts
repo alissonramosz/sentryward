@@ -18,6 +18,9 @@ export async function getBenchmarks(req: Request, res: Response) {
         ...scope,
         ...(since ? { createdAt: { gte: since } } : {}),
         status: { notIn: ["superseded", "skipped", "cancelled"] },
+        // A trial skips the walkthrough and publishing, so its duration and
+        // outcome say nothing about the change's reviews.
+        trial: false,
       },
       select: {
         createdAt: true,

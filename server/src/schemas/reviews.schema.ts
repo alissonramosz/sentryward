@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customReviewerSchema } from "../review/config/schema.ts";
 import { MAX_CHANGE_NUMBER, MAX_FOCUS, normalizeFocus } from "../review/core/models.ts";
 import { pageSchema } from "./pagination.ts";
 
@@ -28,6 +29,24 @@ export const createReviewByRepoSchema = z.object({
   focus,
   deep,
 });
+
+// A custom reviewer tried on one change before it is saved. Validated like a
+// saved one, so a trial cannot run what the settings would refuse.
+// Names the change by repository and number, or by its URL as the settings
+// editor does, where no repository is selected.
+// One object rather than a union, so a bad reviewer is reported field by field.
+export const createTrialSchema = z
+  .object({
+    repoId: z.uuid().optional(),
+    number: changeNumber.optional(),
+    url: z.string().trim().min(1, "Paste a pull or merge request URL").optional(),
+    reviewer: customReviewerSchema,
+  })
+  .superRefine((body, ctx) => {
+    if (body.url === undefined && (body.repoId === undefined || body.number === undefined)) {
+      ctx.addIssue({ code: "custom", path: ["url"], message: "Paste a pull or merge request URL" });
+    }
+  });
 
 export const listReviewsQuerySchema = z.object({
   repoId: z.uuid().optional(),

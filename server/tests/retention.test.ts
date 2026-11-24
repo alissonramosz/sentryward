@@ -159,6 +159,15 @@ describe("pruneReviews", () => {
     }
   });
 
+  it("never lets a later trial stand in for the change's newest review", async () => {
+    const newest = await job("completed", OLD);
+    const trial = await job("completed", new Date("2026-04-15T00:00:00Z"), { trial: true });
+
+    expect(await pruneReviews(30, { now: NOW })).toEqual({ deleted: 0, trimmed: 1 });
+    expect(await load(newest.id)).toMatchObject({ result: { big: true }, resultExpiredAt: null });
+    expect(await load(trial.id)).toMatchObject({ result: null, resultExpiredAt: NOW });
+  });
+
   it("leaves old runs that stored nothing unmarked", async () => {
     const failed = await job("failed", OLD, {
       result: Prisma.DbNull,

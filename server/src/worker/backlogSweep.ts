@@ -35,7 +35,8 @@ export async function sweepClosedChanges({
   const quiet = new Date(now.getTime() - QUIET_MS);
   const recheck = new Date(now.getTime() - RECHECK_MS);
   // A change a review is queued or running for, or ran recently, is busy:
-  // the close watch and the webhook speak for it.
+  // the close watch and the webhook speak for it. A trial is not activity on
+  // the change: it syncs no findings and never speaks for it.
   const candidates = await prisma.$queryRaw<{ repository_id: string; number: number }[]>`
     SELECT f.repository_id, f.number
     FROM findings f
@@ -48,7 +49,7 @@ export async function sweepClosedChanges({
       AND (s.id IS NULL OR (s.state <> 'merged' AND s.checked_at < ${recheck}))
       AND NOT EXISTS (
         SELECT 1 FROM review_jobs j
-        WHERE j.repository_id = f.repository_id AND j.number = f.number
+        WHERE j.repository_id = f.repository_id AND j.number = f.number AND j.trial = false
           AND (j.status IN ('queued', 'running') OR j.created_at >= ${quiet})
       )
     GROUP BY f.repository_id, f.number

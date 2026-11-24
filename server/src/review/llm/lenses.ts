@@ -1,18 +1,27 @@
+import picomatch from "picomatch";
 import type { Config, Specialist } from "../config/schema.ts";
 
 // A lens is one way of looking at a planned chunk. Every chunk gets the
 // general pass; a deep review (review.deep) adds one specialist pass per chunk
 // for each selected specialist, each told to look for one kind of defect
-// only. Narrow instructions find what a general pass skims over, at the cost
-// of one additional pass per specialist, which may make multiple model calls
-// in agentic mode.
+// only, and every enabled custom reviewer (config.reviewers) adds one per
+// chunk holding a file it covers. Narrow instructions find what a general
+// pass skims over, at the cost of one additional pass per lens, which may make
+// multiple model calls in agentic mode.
 export interface Lens {
-  // "general" for the general pass, otherwise the specialist's name.
+  // "general" for the general pass, otherwise the specialist's or custom
+  // reviewer's id. The schema keeps custom ids apart from the built-in ones.
   id: string;
-  kind: "general" | "specialist";
-  // What the pass looks for, appended to the system prompt. Written here, never
-  // taken from a repository or a request, so it is trusted like the prompt.
+  kind: "general" | "specialist" | "custom";
+  // What the pass looks for, appended to the system prompt. A specialist's is
+  // written here; a saved custom reviewer's comes from the dashboard or base
+  // revision, while a trial accepts it from an authorized settings editor's
+  // request. Both are treated as trusted like repository guidance and rules.
   instructions?: string;
+  // A custom reviewer's display name, and the globs over file paths it
+  // covers (absent: every reviewed file).
+  name?: string;
+  paths?: string[];
 }
 
 export const GENERAL_LENS: Lens = { id: "general", kind: "general" };
@@ -41,7 +50,33 @@ export function specialistLenses(config: Config): Lens[] {
   return config.review.deep.specialists.map((id) => ({ id, kind: "specialist", instructions: SPECIALIST_INSTRUCTIONS[id] }));
 }
 
+export function customLenses(config: Config): Lens[] {
+  return config.reviewers
+    .filter((reviewer) => reviewer.enabled !== false)
+    .map((reviewer) => ({
+      id: reviewer.id,
+      kind: "custom",
+      name: reviewer.name,
+      instructions: reviewer.instructions,
+      ...(reviewer.paths?.length ? { paths: reviewer.paths } : {}),
+    }));
+}
+
 // Every lens a review of this config runs, the general pass first.
 export function lensesFor(config: Config): Lens[] {
-  return [GENERAL_LENS, ...specialistLenses(config)];
+  return [GENERAL_LENS, ...specialistLenses(config), ...customLenses(config)];
+}
+
+const matchers = new WeakMap<object, (path: string) => boolean>();
+
+// Whether a lens, or the custom reviewer behind one, looks at this file. Only
+// custom reviewers are scoped; the rest cover every reviewed file.
+export function lensCovers(scoped: { paths?: string[] }, path: string): boolean {
+  if (!scoped.paths?.length) return true;
+  let matcher = matchers.get(scoped);
+  if (!matcher) {
+    matcher = picomatch(scoped.paths, { dot: true });
+    matchers.set(scoped, matcher);
+  }
+  return matcher(path);
 }

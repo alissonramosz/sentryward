@@ -488,6 +488,14 @@ model ReviewJob {
   // the trigger layer turns review.deep on. Kept by retention like focus, so a
   // re-run asks for the same depth.
   deep            Boolean        @default(false)
+  // A trial of a custom reviewer that is not saved yet: the run reviews the
+  // change with the draft in place of the saved custom reviewers, stores the
+  // result for the dashboard and posts nothing. A trial never speaks for the change, so every query that asks
+  // what the change's reviews said (incremental base, verdict changes,
+  // backlog, supersede and duplicate checks) filters on `trial`; the draft is
+  // kept on the row so a re-run tries the same definition.
+  trial           Boolean        @default(false)
+  trialReviewer   Json?          @map("trial_reviewer")
   status          ReviewStatus   @default(queued)
   verdict         ReviewVerdict?
   resolvedConfig  Json?          @map("resolved_config")

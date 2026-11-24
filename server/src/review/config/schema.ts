@@ -343,6 +343,72 @@ export const rulesSchema = z
     }
   });
 
+// Custom reviewers: team-defined extra passes, each with its own instructions
+// (llm/lenses.ts). Like rules they come from the dashboard or the base
+// revision's config file, never from the change, so their instructions are
+// trusted like the repository guidance. Every enabled one costs a model call
+// per pass whose files it covers, so the list and its text are capped.
+export const MAX_REVIEWERS = 8;
+export const MAX_REVIEWER_CHARS = 12_000;
+// Ids a deep review already tags findings with: a custom reviewer named like
+// one would be indistinguishable from it on the review page and in usage.
+const RESERVED_REVIEWER_IDS = new Set<string>(["general", ...SPECIALISTS]);
+
+export const customReviewerSchema = z.strictObject({
+  id: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9_.-]{0,63}$/, "Use lowercase letters, digits, dots, dashes and underscores, e.g. api-contracts")
+    .refine((id) => !RESERVED_REVIEWER_IDS.has(id), "This id is used by a built-in reviewer; choose another"),
+  name: z.string().trim().min(1).max(60),
+  instructions: z.string().trim().min(1).max(4000),
+  // Globs over the file path; absent means every reviewed file. An empty
+  // list is refused, since it would read as "every file" too.
+  paths: z.array(z.string().min(1)).min(1).max(50).optional(),
+  // What it reports at all; absent uses review.severityFloor.
+  severityFloor: severitySchema.optional(),
+  // At most this many of its findings per review, the most severe first.
+  maxFindings: z.number().int().min(1).max(50).optional(),
+  // A disabled reviewer is kept in the settings but never runs.
+  enabled: z.boolean().optional(),
+});
+export type CustomReviewer = z.infer<typeof customReviewerSchema>;
+
+function reviewerChars(reviewers: CustomReviewer[]): number {
+  // Paths are counted without separators: unlike rule paths, a reviewer's
+  // paths only filter files and are never printed in a prompt.
+  return reviewers.reduce(
+    (sum, reviewer) =>
+      sum +
+      reviewer.name.length +
+      reviewer.instructions.length +
+      (reviewer.paths?.reduce((pathSum, path) => pathSum + path.length, 0) ?? 0),
+    0,
+  );
+}
+
+// The limits on a list as a whole, for the combination of layers (resolve.ts).
+export function combinedReviewersError(reviewers: CustomReviewer[]): string | undefined {
+  if (reviewers.length > MAX_REVIEWERS) return `At most ${MAX_REVIEWERS} custom reviewers`;
+  if (reviewerChars(reviewers) > MAX_REVIEWER_CHARS) {
+    return `Custom reviewers may hold at most ${MAX_REVIEWER_CHARS} characters in total (names, instructions and paths)`;
+  }
+  return undefined;
+}
+
+export const reviewersSchema = z
+  .array(customReviewerSchema)
+  .max(MAX_REVIEWERS)
+  .superRefine((reviewers, ctx) => {
+    const seen = new Set<string>();
+    for (const [index, reviewer] of reviewers.entries()) {
+      if (seen.has(reviewer.id)) ctx.addIssue({ code: "custom", path: [index, "id"], message: `Duplicate reviewer id ${reviewer.id}` });
+      seen.add(reviewer.id);
+    }
+    if (reviewerChars(reviewers) > MAX_REVIEWER_CHARS) {
+      ctx.addIssue({ code: "custom", message: combinedReviewersError(reviewers)! });
+    }
+  });
+
 // Set by resolution only, never by a layer: the override schemas are strict
 // and do not list it. A repository file or trigger may tighten the floor and
 // confidence for dashboard rules but not loosen them, and may not hide files
@@ -366,6 +432,9 @@ const topLevelShape = {
   // (resolve.ts), so a repository file cannot loosen workspace rules. Their
   // thresholds are held too (ruleGuard).
   rules: rulesSchema,
+  // Custom reviewers combine across layers the same way rules do, so a
+  // repository file can add one but never drop or redefine the workspace's.
+  reviewers: reviewersSchema,
 };
 
 export const configSchema = z.strictObject({
@@ -563,4 +632,5 @@ export const DEFAULT_CONFIG: Config = {
   instructions: "",
   languageInstructions: {},
   rules: [],
+  reviewers: [],
 };

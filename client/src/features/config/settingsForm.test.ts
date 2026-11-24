@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest"
 import type { ConfigSchema } from "./api"
-import { EMPTY_RULE, INHERIT, baseConfig, isDirty, ruleRowErrors, toForm, toSettings, validateForm, withoutDefaults } from "./settingsForm"
+import {
+  EMPTY_REVIEWER,
+  EMPTY_RULE,
+  INHERIT,
+  baseConfig,
+  isDirty,
+  reviewerIdFrom,
+  reviewerRowErrors,
+  ruleRowErrors,
+  toForm,
+  toSettings,
+  validateForm,
+  withoutDefaults,
+} from "./settingsForm"
 
 const schema: ConfigSchema = {
   defaults: {
@@ -510,5 +523,56 @@ describe("LLM connection", () => {
 
   it("requires a connection for the global form", () => {
     expect(validateForm(toForm({}), true)).toMatchObject({ connection: "Select an LLM connection" })
+  })
+})
+
+describe("custom reviewers", () => {
+  const reviewer = { id: "api-contracts", name: "API contracts", instructions: "Response shapes." }
+
+  it("round-trips reviewers, saving optional fields only when set and dropping blank rows", () => {
+    const saved = { reviewers: [{ ...reviewer, paths: ["server/**"], severityFloor: "info", maxFindings: 3, enabled: false }, reviewer] }
+    const form = toForm(saved)
+    expect(form.reviewers[0]).toEqual({
+      key: expect.any(String),
+      id: "api-contracts",
+      name: "API contracts",
+      instructions: "Response shapes.",
+      paths: "server/**",
+      severityFloor: "info",
+      maxFindings: "3",
+      enabled: false,
+    })
+    expect(form.reviewers[0]!.key).not.toBe(form.reviewers[1]!.key)
+    expect(toSettings({}, { ...form, reviewers: [...form.reviewers, { ...EMPTY_REVIEWER }] })).toEqual(saved)
+  })
+
+  it("derives an id from a name", () => {
+    expect(reviewerIdFrom("API contracts")).toBe("api-contracts")
+    expect(reviewerIdFrom("  --Docs & Tests!")).toBe("docs-tests")
+    // Cut at 64 characters, then trimmed again so the cut never ends on a separator.
+    expect(reviewerIdFrom(`${"a".repeat(63)} tail`)).toBe("a".repeat(63))
+  })
+
+  it("marks incomplete rows, reserved ids and bad limits", () => {
+    const rows = [
+      { ...EMPTY_REVIEWER, name: "Tests", id: "tests", instructions: "x" },
+      { ...EMPTY_REVIEWER, id: "ok", name: "", instructions: "", maxFindings: "0" },
+    ]
+    expect(reviewerRowErrors(rows)).toEqual([
+      { id: "This id is used by a built-in reviewer; choose another" },
+      { name: "Enter a name", instructions: "Say what this reviewer looks for", maxFindings: "Enter a whole number between 1 and 50" },
+    ])
+  })
+
+  it("refuses an id the inherited reviewers use, and too many together", () => {
+    const own = { ...toForm({ reviewers: [reviewer] }) }
+    expect(validateForm(own, false, undefined, undefined, [], "global", [reviewer]).reviewers).toBe(
+      "Custom reviewer api-contracts is already set in the global config, which wins",
+    )
+    const inherited = Array.from({ length: 8 }, (_, i) => ({ ...reviewer, id: `r${i}` }))
+    expect(validateForm(own, false, undefined, undefined, [], "global", inherited).reviewers).toBe(
+      "At most 8 custom reviewers, together with the 8 global reviewers",
+    )
+    expect(validateForm(own).reviewers).toBeUndefined()
   })
 })

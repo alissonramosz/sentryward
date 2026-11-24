@@ -10,8 +10,8 @@ import {
   ruleSuggestionIdParamSchema,
   saveRuleSuggestionSettingsSchema,
 } from "../schemas/ruleSuggestions.schema.ts";
-import { loadRuleRepositories, repositoryRuleIssues } from "./config.controller.ts";
-import { requireRepoSettingsRules } from "./repos.controller.ts";
+import { loadRuleAndReviewerRepositories, repositoryCombinedIssues } from "./config.controller.ts";
+import { requireRepoSettingsLists } from "./repos.controller.ts";
 
 // Rule suggestions drafted by worker/ruleSuggestions.ts. Nothing reaches a
 // config layer until an admin approves one here, through the same checks as
@@ -302,9 +302,9 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
       // approval is; repositories already left out stay a config page warning
       // and do not block. Repository and folder saves take this workspace's
       // lock first, so none can add a clashing rule while this commits.
-      const repos = await loadRuleRepositories(tx, workspaceId);
-      const before = new Set(repositoryRuleIssues(repos, workspace!.review_settings));
-      const issues = repositoryRuleIssues(repos, settings).filter((issue) => !before.has(issue));
+      const repos = await loadRuleAndReviewerRepositories(tx, workspaceId);
+      const before = new Set(repositoryCombinedIssues(repos, workspace!.review_settings));
+      const issues = repositoryCombinedIssues(repos, settings).filter((issue) => !before.has(issue));
       if (issues.length) throw new HttpError(400, "Validation failed", { "rule.id": issues });
       await tx.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: settings } });
       appliedTarget = "global";
@@ -324,7 +324,7 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
         throw new HttpError(409, "This repository follows the global settings, so its own rules would be ignored: choose Global, or give it settings of its own first");
       }
       const settings = withRule(saved.settings, rule, "repository");
-      requireRepoSettingsRules(workspace!.review_settings, saved, settings, false);
+      requireRepoSettingsLists(workspace!.review_settings, saved, settings, false, ["rules"]);
       await tx.repository.update({ where: { id: repo.id }, data: { settings } });
       appliedTarget = repo.id;
     }

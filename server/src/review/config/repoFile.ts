@@ -21,8 +21,11 @@ function camelToSnake(key: string): string {
   return key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 }
 
+// List items are converted too: custom reviewers are objects in a list
+// (max_findings, severity_floor). Rules are as well, but none of their keys
+// has an underscore, and strings in a list pass through unchanged.
 function camelizeKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value;
+  if (Array.isArray(value)) return value.map(camelizeKeys);
   if (typeof value !== "object" || value === null) return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [

@@ -1421,6 +1421,25 @@ describe("rule suggestions API", () => {
     expect(res.body.errors.rules).toBeDefined();
   });
 
+  it("does not let a reviewer clash already in a repository block a rule approved into it", async () => {
+    const reviewer = { id: "api", name: "API", instructions: "Check API contracts." };
+    // Global saves only warn about a clash with a repository's own reviewer,
+    // so the repository can already be in this state before the approval.
+    await prisma.workspace.update({ where: { id: workspaceId }, data: { reviewSettings: { reviewers: [reviewer] } } });
+    const repo = await githubRepo();
+    await prisma.repository.update({ where: { id: repo.id }, data: { followGlobal: false, settings: { reviewers: [reviewer] } } });
+    const row = await suggestion(repo.id);
+    const res = await request(app)
+      .post(`/api/rule-suggestions/${row.id}/approve`)
+      .set("Cookie", cookie)
+      .send({ rule: RULE, target: { repositoryId: repo.id } });
+    expect(res.status).toBe(200);
+    expect((await prisma.repository.findUniqueOrThrow({ where: { id: repo.id } })).settings).toMatchObject({
+      reviewers: [expect.objectContaining({ id: "api" })],
+      rules: [RULE],
+    });
+  });
+
   it("does not approve into another workspace's repository", async () => {
     const other = await createUser("other@example.com");
     const otherWorkspace = workspaceId;

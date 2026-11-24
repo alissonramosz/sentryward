@@ -28,10 +28,10 @@ import { ToolsUnsupportedError, toolsUnsupportedWarning, type GenerateAgentic } 
 import { reviewChunkAgentic } from "./llm/agenticReview.ts";
 import { errorMessage, failedUsage, spentBy, type Generate } from "./llm/providers.ts";
 import { reviewChunk, type ChunkReview } from "./llm/review.ts";
-import { lensesFor, type Lens } from "./llm/lenses.ts";
+import { lensCovers, lensesFor, type Lens } from "./llm/lenses.ts";
 import { mergeAcrossLenses } from "./validate/lensDedupe.ts";
 import { generateWalkthrough, type WalkthroughIssues } from "./llm/walkthrough.ts";
-import { capFindings, compareFindings, noopKey, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
+import { capFindings, capPerReviewer, compareFindings, noopKey, validateFindings, validateToolFindings, type DropReason, type TaggedFinding } from "./validate/validator.ts";
 import { verifies, verifyFindings } from "./validate/verify.ts";
 import { checkClaims } from "./validate/claims.ts";
 import { checkPatternRules } from "./rules.ts";
@@ -243,8 +243,9 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   let failedPasses = 0;
   // Shared by every pass: GitHub rate-limits code search per token.
   const searches = searchBudget(config.review.agent.maxSearches);
-  // A deep review's specialists outnumber the general passes, so without a
-  // reserve they could spend every search before a general pass needs one.
+  // A deep review's specialists and the custom reviewers outnumber the
+  // general passes, so without a reserve they could spend every search before
+  // a general pass needs one.
   const specialistSearches = reservedBudget(searches, Math.ceil(config.review.agent.maxSearches / 2));
   type PassOutcome =
     | { chunk: Chunk; lens: Lens; review: ChunkReview; error?: undefined; spent?: undefined }
@@ -260,7 +261,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
         chunk,
         chunks.length,
         config,
-        { source: deps.context!, searches: lens.kind === "specialist" ? specialistSearches : searches },
+        { source: deps.context!, searches: lens.kind === "general" ? searches : specialistSearches },
         input.rejectedFindings,
         manifest,
         input.focus,
@@ -285,7 +286,11 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   };
   // The general passes go first, so a deep review covers the change as soon
   // as a plain one would before the specialists add to it.
-  const passes = lenses.flatMap((lens) => chunks.map((chunk) => ({ chunk, lens })));
+  // A custom reviewer only reviews the passes holding a file it covers, so one
+  // scoped to a folder the change does not touch costs nothing.
+  const passes = lenses.flatMap((lens) =>
+    chunks.filter((chunk) => chunk.parts.some((part) => lensCovers(lens, part.file.path))).map((chunk) => ({ chunk, lens })),
+  );
   let passesDone = 0;
   // With nothing planned there are no passes to count.
   const reportPasses = () => {
@@ -302,9 +307,10 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       reportPasses();
     }
   });
-  // A specialist's calls are tagged so their cost can be told apart.
+  // A specialist's or custom reviewer's calls are tagged so their cost can be
+  // told apart.
   const tagLens = (lens: Lens, entries: LlmUsage[]): LlmUsage[] =>
-    lens.kind === "specialist" ? entries.map((entry) => ({ ...entry, lens: lens.id })) : entries;
+    lens.kind === "general" ? entries : entries.map((entry) => ({ ...entry, lens: lens.id }));
   // The general pass alone decides coverage, so what a specialist found in a
   // pass whose general pass failed is dropped with it. This is per pass, not
   // per file: a file split across passes keeps what was found where its
@@ -314,21 +320,25 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     outcomes.filter((outcome) => !outcome.review && outcome.lens.kind === "general").map((outcome) => outcome.chunk.index),
   );
   let orphaned = 0;
+  let orphanedCustom = 0;
   for (const outcome of outcomes) {
-    const specialist = outcome.lens.kind === "specialist";
-    if (outcome.review && specialist && failedGeneral.has(outcome.chunk.index)) {
-      orphaned += outcome.review.findings.length;
+    // Specialists and custom reviewers alike: extra passes over chunks the
+    // general pass covers.
+    const extraPass = outcome.lens.kind !== "general";
+    if (outcome.review && extraPass && failedGeneral.has(outcome.chunk.index)) {
+      if (outcome.lens.kind === "custom") orphanedCustom += outcome.review.findings.length;
+      else orphaned += outcome.review.findings.length;
       usage.push(...tagLens(outcome.lens, [...outcome.review.failedUsage, outcome.review.usage]));
       warnings.push(...outcome.review.warnings);
       continue;
     }
     if (outcome.review) {
       const { model } = outcome.review.usage;
-      // A specialist was not given the team rules, so a rule it names is not
+      // An extra pass was not given the team rules, so a rule it names is not
       // one it was checking; the general pass reports rule violations.
       raw.push(
         ...outcome.review.findings.map((finding) =>
-          specialist ? { ...finding, ruleId: null, model, reviewer: outcome.lens.id } : { ...finding, model },
+          extraPass ? { ...finding, ruleId: null, model, reviewer: outcome.lens.id } : { ...finding, model },
         ),
       );
       usage.push(...tagLens(outcome.lens, [...outcome.review.failedUsage, outcome.review.usage]));
@@ -338,8 +348,12 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     usage.push(...tagLens(outcome.lens, outcome.spent));
     // The general pass alone decides coverage: a failed specialist leaves the
     // change reviewed, only less deeply.
-    if (specialist) {
-      warnings.push(`Deep review pass ${outcome.lens.id} on pass ${outcome.chunk.index} failed: ${outcome.error}`);
+    if (extraPass) {
+      warnings.push(
+        outcome.lens.kind === "custom"
+          ? `Custom reviewer ${outcome.lens.name ?? outcome.lens.id} on pass ${outcome.chunk.index} failed: ${outcome.error}`
+          : `Deep review pass ${outcome.lens.id} on pass ${outcome.chunk.index} failed: ${outcome.error}`,
+      );
       continue;
     }
     failedPasses += 1;
@@ -373,6 +387,11 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   if (orphaned > 0) {
     warnings.push(`${orphaned} deep review finding${orphaned === 1 ? " was" : "s were"} dropped with files whose review pass failed`);
   }
+  if (orphanedCustom > 0) {
+    warnings.push(
+      `${orphanedCustom} custom reviewer finding${orphanedCustom === 1 ? " was" : "s were"} dropped with files whose review pass failed`,
+    );
+  }
   // Uncapped: claim checks may drop findings, and the cap then takes the next
   // ones in line rather than leaving their slots empty.
   const validation = validateFindings(
@@ -401,8 +420,10 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       warnings.push(`Claim checks failed, the findings were kept: ${errorMessage(err)}`);
     }
   }
-  const limited = capFindings(claims.findings, config.review.maxFindings);
-  if (limited.overLimit > 0) validation.dropped.over_limit = limited.overLimit;
+  const perReviewer = capPerReviewer(claims.findings, config, lensed.shared);
+  const limited = capFindings(perReviewer.findings, config.review.maxFindings);
+  const cappedCount = perReviewer.overLimit + limited.overLimit;
+  if (cappedCount > 0) validation.dropped.over_limit = cappedCount;
   // After validation, so only findings that would be published are checked,
   // and before the verdict, so a refuted blocker cannot fail the status.
   const verified = await verifyFindings({

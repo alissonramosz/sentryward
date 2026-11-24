@@ -4,12 +4,12 @@ import {
   configOverrideSchema,
   configSchema,
   combinedRulesError,
+  combinedReviewersError,
   dashboardOverrideSchema,
   type Config,
   type ConfigOverride,
   type DashboardOverride,
   type ProfileName,
-  type Rule,
   type RuleGuard,
 } from "./schema.ts";
 import { atLeast } from "../core/severity.ts";
@@ -35,15 +35,19 @@ export interface ResolvedConfig {
   // Dotted leaf path to the layer that set it, so a result can say why a
   // setting has the value it does.
   sources: Record<string, LayerName>;
-  // Rules a layer could not add (rulesFrom); the config still resolves.
+  // Rules and custom reviewers a layer could not add (combinedFrom); the
+  // config still resolves.
   warnings: string[];
   // The same, by layer, for callers that reject a save instead of warning.
-  ruleIssues: RuleIssue[];
+  // Reviewers are included, so every save check that holds rules holds them.
+  combinedIssues: CombinedIssue[];
 }
 
-export interface RuleIssue {
+export interface CombinedIssue {
   layer: LayerName;
-  // "clash": a rule id already set below; "limit": the layer's rules broke a
+  // Which combined list the issue is about.
+  list: "rules" | "reviewers";
+  // "clash": an id already set below; "limit": the layer's additions broke a
   // limit together with those below and were left out.
   kind: "clash" | "limit";
   message: string;
@@ -103,43 +107,66 @@ const LAYER_LABELS: Record<LayerName, string> = {
   trigger: "the trigger",
 };
 
-// Rules combine across layers instead of replacing like other lists: each
-// layer adds to those below it and can never drop or redefine one of them, so
-// a repository file cannot loosen what the workspace requires. Every layer was
-// validated on its own, so only the combination can break a limit; then that
-// layer's additions are left out as a whole, never half of them.
-function rulesFrom(layers: [LayerName, ConfigOverride | undefined][], sources: Record<string, LayerName>, issues: RuleIssue[]): Rule[] {
-  let rules: Rule[] = [];
+// The lists that combine across layers instead of replacing, and how their
+// messages name one entry and the whole list.
+const COMBINED = {
+  rules: { one: "Rule", many: "Rules", noun: "rule", limit: combinedRulesError },
+  reviewers: { one: "Custom reviewer", many: "Custom reviewers", noun: "custom reviewer", limit: combinedReviewersError },
+} as const;
+type CombinedKey = keyof typeof COMBINED;
+
+// Rules and custom reviewers combine across layers instead of replacing like
+// other lists: each layer adds to those below it and can never drop or
+// redefine one of them, so a repository file cannot loosen what the workspace
+// requires. Every layer was validated on its own, so only the combination can
+// break a limit; then that layer's additions are left out as a whole, never
+// half of them.
+function combinedFrom<K extends CombinedKey>(
+  key: K,
+  layers: [LayerName, ConfigOverride | undefined][],
+  sources: Record<string, LayerName>,
+  issues: CombinedIssue[],
+): NonNullable<ConfigOverride[K]> {
+  const { one, many, noun, limit } = COMBINED[key];
+  type Entry = NonNullable<ConfigOverride[K]>[number];
+  let entries: Entry[] = [];
   for (const [name, layer] of layers) {
-    if (!layer?.rules?.length) continue;
-    const added: Rule[] = [];
-    for (const rule of layer.rules) {
-      const owner = sources[`rules.${rule.id}`];
+    const own = layer?.[key] as Entry[] | undefined;
+    if (!own?.length) continue;
+    const added: Entry[] = [];
+    for (const entry of own) {
+      const owner = sources[`${key}.${entry.id}`];
       if (owner) {
-        issues.push({ layer: name, kind: "clash", message: `Rule ${rule.id} in ${LAYER_LABELS[name]} was ignored: a rule with that id is already set in ${LAYER_LABELS[owner]}` });
-      } else added.push(rule);
+        issues.push({
+          layer: name,
+          list: key,
+          kind: "clash",
+          message: `${one} ${entry.id} in ${LAYER_LABELS[name]} was ignored: a ${noun} with that id is already set in ${LAYER_LABELS[owner]}`,
+        });
+      } else added.push(entry);
     }
     if (!added.length) continue;
-    const combined = [...rules, ...added];
-    const reason = combinedRulesError(combined);
+    const combined = [...entries, ...added];
+    const reason = (limit as (list: Entry[]) => string | undefined)(combined);
     if (reason) {
       issues.push({
         layer: name,
+        list: key,
         kind: "limit",
-        message: `Rules in ${LAYER_LABELS[name]} were ignored: together with the rules below them, ${reason.charAt(0).toLowerCase()}${reason.slice(1)}`,
+        message: `${many} in ${LAYER_LABELS[name]} were ignored: together with the ${noun}s below them, ${reason.charAt(0).toLowerCase()}${reason.slice(1)}`,
       });
       continue;
     }
-    rules = combined;
-    for (const rule of added) sources[`rules.${rule.id}`] = name;
-    sources.rules = name;
+    entries = combined;
+    for (const entry of added) sources[`${key}.${entry.id}`] = name;
+    sources[key] = name;
   }
-  return rules;
+  return entries as NonNullable<ConfigOverride[K]>;
 }
 
-function withoutRules<T extends ConfigOverride>(layer: T): T {
-  if (layer.rules === undefined) return layer;
-  const { rules: _rules, ...rest } = layer;
+function withoutCombined<T extends ConfigOverride>(layer: T): T {
+  if (layer.rules === undefined && layer.reviewers === undefined) return layer;
+  const { rules: _rules, reviewers: _reviewers, ...rest } = layer;
   return rest as T;
 }
 
@@ -173,18 +200,19 @@ export function resolveConfig(layers: ConfigLayers): ResolvedConfig {
     if (layer) stack.push([name, withLegacyTriggers(layer)]);
   }
   for (const [name, layer] of stack) {
-    merged = merge(merged, withoutRules(layer) as Plain);
-    recordLeaves(withoutRules(layer), name, sources);
+    merged = merge(merged, withoutCombined(layer) as Plain);
+    recordLeaves(withoutCombined(layer), name, sources);
   }
   // `profile` is decided above, not merged; attribute it to whoever named it.
   sources.profile = naming?.[0] ?? "default";
-  const ruleIssues: RuleIssue[] = [];
-  merged.rules = rulesFrom(ordered, sources, ruleIssues);
+  const combinedIssues: CombinedIssue[] = [];
+  merged.rules = combinedFrom("rules", ordered, sources, combinedIssues);
+  merged.reviewers = combinedFrom("reviewers", ordered, sources, combinedIssues);
   const config = configSchema.parse(merged);
   const ruleGuard = guardFor(layers, config, sources);
   if (ruleGuard) config.ruleGuard = ruleGuard;
 
-  return { config, sources, warnings: ruleIssues.map((issue) => issue.message), ruleIssues };
+  return { config, sources, warnings: combinedIssues.map((issue) => issue.message), combinedIssues };
 }
 
 

@@ -241,6 +241,20 @@ describe("building digests", () => {
     expect(updated.digestDueAt!.getTime()).toBeGreaterThan(now.getTime());
   });
 
+  it("keeps a change blocked when only a trial passed after it", async () => {
+    await digestTarget({ dueAt: FUTURE });
+    const blocked = await finish("completed", "blocked");
+    // Trials are never notified, so it is created without notifyJob.
+    await prisma.reviewJob.create({
+      data: { repositoryId, number: blocked.number, headSha: "aaa", trigger: "manual", status: "completed", verdict: "pass", trial: true, finishedAt: new Date() },
+    });
+    await prisma.notificationTarget.updateMany({ data: { digestDueAt: PAST } });
+
+    expect(await runDueDigests()).toBe(1);
+    const payload = (await rows())[0]!.payload as unknown as DigestPayload;
+    expect(payload.blocked.map((review) => review.change.number)).toEqual([blocked.number]);
+  });
+
   it("sends nothing for an empty period but moves the schedule on", async () => {
     const target = await digestTarget();
     expect(await runDueDigests()).toBe(0);

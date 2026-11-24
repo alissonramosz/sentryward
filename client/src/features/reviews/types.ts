@@ -65,6 +65,8 @@ export interface Finding {
   ruleId?: string
   // The deep review specialist that raised it; absent for the general pass.
   reviewer?: string
+  // Set only for a custom reviewer's findings; specialists have none.
+  reviewerName?: string
   fingerprint: string
   // The model of the review pass that raised it; absent for tool and rule
   // findings and older results.
@@ -94,6 +96,7 @@ export type DropReason =
   | "refuted"
   | "rule_mismatch"
   | "claim_refuted"
+  | "reviewer_mismatch"
 
 export interface UsageTotals {
   calls: number
@@ -229,6 +232,9 @@ export interface ReviewListItem {
   startedAt: string | null
   finishedAt: string | null
   repository: { id: string; provider: Provider; host: string; fullPath: string }
+  // A trial of a custom reviewer that is not saved yet: nothing was posted to
+  // the change. Absent in responses from before trials existed.
+  trial?: boolean
   // Only in the "changes" view: matching runs of this change, this one included.
   runCount?: number
 }
@@ -288,7 +294,14 @@ export interface ReviewDetail extends ReviewListItem {
   // The config the run used, with the layer each field came from. Cleared by
   // retention like the result.
   // `directory`: the folder whose settings the review used, if any.
-  resolvedConfig: { sources?: Record<string, string>; repoFile?: string | null; directory?: string | null } | null
+  resolvedConfig: {
+    sources?: Record<string, string>
+    repoFile?: string | null
+    directory?: string | null
+    // Only what the page reads of the resolved config: which extra passes were
+    // custom reviewers rather than deep review specialists.
+    config?: { reviewers?: { id: string; name: string }[] }
+  } | null
   // `enabled` is the repository's current state: a re-run is refused while it is off.
   repository: ReviewListItem["repository"] & { enabled: boolean }
 }

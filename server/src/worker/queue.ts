@@ -4,6 +4,7 @@ import { FORGE_TIMEOUT_MS } from "../review/forge/http.ts";
 import { prisma } from "../lib/prisma.ts";
 import type { Prisma, Repository, ReviewJob, ReviewTrigger } from "../generated/prisma/client.ts";
 import { loadDashboardConfigs } from "../review/config/load.ts";
+import type { CustomReviewer } from "../review/config/schema.ts";
 import type { ResultSummary } from "../review/render/json.ts";
 import { normalizeFocus, type ReviewProgress } from "../review/core/models.ts";
 
@@ -22,6 +23,14 @@ export interface EnqueueInput {
   focus?: string | null;
   // A deep review for this run only (see ReviewJob.deep).
   deep?: boolean;
+}
+
+// A custom reviewer tried on a change before it is saved (see ReviewJob.trial).
+export interface TrialInput {
+  repositoryId: string;
+  number: number;
+  headSha: string;
+  reviewer: CustomReviewer;
 }
 
 // Every write that queues, supersedes or cancels a change's queued jobs takes
@@ -56,6 +65,8 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
         number: input.number,
         headSha: input.headSha,
         status: { in: ["queued", "running"] },
+        // A trial answers nobody's request for a review.
+        trial: false,
         ...(input.focus ? { focus: input.focus } : {}),
         ...(input.deep ? { deep: true } : {}),
       },
@@ -68,6 +79,48 @@ export async function enqueue(request: EnqueueInput): Promise<ReviewJob> {
   });
 }
 
+// A trial neither supersedes nor is superseded by the change's reviews: it
+// publishes nothing, so it cannot race them on the forge, and a push must not
+// throw away a trial someone is waiting on. The change's lease still runs the
+// two one at a time. Each request is its own trial (drafts differ), so there
+// is no duplicate check either.
+//
+// The caller checks the repository is on before a forge request, so a
+// repository turned off during that request would otherwise get a trial after
+// its jobs were cancelled. FOR SHARE waits for a turn-off in flight (each one
+// updates the row and cancels its jobs in one transaction) and then reads the
+// new state; a turn-off that starts after it waits for this insert and then
+// cancels it with the rest. The change's lock comes first, like every other
+// enqueue, so a close cancelling the change's queued jobs cannot miss a trial
+// being queued at the same moment.
+export async function enqueueTrial(input: TrialInput): Promise<ReviewJob> {
+  return prisma.$transaction(async (tx) => {
+    await lockEnqueue(tx, input.repositoryId, input.number);
+    const [repo] = await tx.$queryRaw<{ enabled: boolean }[]>`
+      SELECT enabled FROM repositories WHERE id = ${input.repositoryId}::uuid FOR SHARE`;
+    if (!repo?.enabled) {
+      throw new RepositoryDisabledError();
+    }
+    return tx.reviewJob.create({
+      data: {
+        repositoryId: input.repositoryId,
+        number: input.number,
+        headSha: input.headSha,
+        trigger: "manual",
+        trial: true,
+        trialReviewer: input.reviewer,
+      },
+    });
+  });
+}
+
+export class RepositoryDisabledError extends Error {
+  constructor() {
+    super("Reviews are turned off for this repository");
+    this.name = "RepositoryDisabledError";
+  }
+}
+
 // The caller holds the change's lock and has checked the head is not queued.
 async function supersedeAndCreate(tx: Prisma.TransactionClient, input: EnqueueInput): Promise<ReviewJob> {
   await tx.reviewJob.updateMany({
@@ -75,6 +128,7 @@ async function supersedeAndCreate(tx: Prisma.TransactionClient, input: EnqueueIn
       repositoryId: input.repositoryId,
       number: input.number,
       status: "queued",
+      trial: false,
     },
     data: { status: "superseded", finishedAt: new Date() },
   });
@@ -110,6 +164,8 @@ export async function enqueueFromWebhook(input: EnqueueInput): Promise<WebhookEn
         // A skipped job does not count: a draft marked ready for review keeps its
         // head, and must still be reviewed.
         status: { notIn: ["superseded", "skipped"] },
+        // A trial reviewed the head for its draft only, never for the change.
+        trial: false,
         // Nor does one cancelled only because reviews were off or the change
         // closed: that head was never reviewed, and turning the repository back
         // on or reopening the change on the same head should pick it up.
@@ -119,8 +175,10 @@ export async function enqueueFromWebhook(input: EnqueueInput): Promise<WebhookEn
     });
     if (seen) return { queued: false, reason: "duplicate" };
 
+    // Trials never block a change's reviews, so queued ones do not count
+    // toward the cap: an admin trying a reviewer must not stop push reviews.
     const queued = await tx.reviewJob.count({
-      where: { repositoryId: input.repositoryId, status: "queued", number: { not: input.number } },
+      where: { repositoryId: input.repositoryId, status: "queued", number: { not: input.number }, trial: false },
     });
     if (queued >= MAX_QUEUED_PER_REPOSITORY) return { queued: false, reason: "queue_full" };
 
@@ -360,20 +418,28 @@ export async function releaseLease(id: string, attempts: number): Promise<void> 
 // worker (a later attempt) is lost, and the run must leave it alone. So is one
 // whose change has a newer job that already started: that happens only when
 // this run's lease ran out while it was still alive (a stalled process), and
-// the newer head must win, so this run publishes nothing more.
+// the newer head must win, so this run publishes nothing more. A trial is never
+// overtaken that way, by a review or another trial, even after its lease ran
+// out: the lease only orders what runs write to the forge, and a trial writes
+// nothing there (see enqueueTrial). Fencing it would only leave its row running
+// until recoverStale requeued it, so whoever is waiting on the trial would see
+// it hang and then run again.
 export async function claimState(id: string, attempts: number): Promise<"owned" | "cancelled" | "disabled" | "lost"> {
   const job = await prisma.reviewJob.findUnique({
     where: { id },
-    select: { status: true, attempts: true, error: true, repositoryId: true, number: true, createdAt: true },
+    select: { status: true, attempts: true, error: true, repositoryId: true, number: true, createdAt: true, trial: true },
   });
   if (job?.status === "cancelled") return job.error && OFF_REASONS.includes(job.error) ? "disabled" : "cancelled";
   if (job?.status !== "running" || job.attempts !== attempts) return "lost";
+  if (job.trial) return "owned";
   const newer = await prisma.reviewJob.findFirst({
     where: {
       repositoryId: job.repositoryId,
       number: job.number,
       createdAt: { gt: job.createdAt },
       startedAt: { not: null },
+      // A trial publishes nothing, so it never overtakes a review.
+      trial: false,
     },
     select: { id: true },
   });
@@ -409,16 +475,19 @@ export async function recoverStale(
 
   const retryable = await prisma.reviewJob.findMany({
     where: { ...stale, attempts: { lt: maxAttempts } },
-    select: { id: true, repositoryId: true, number: true, createdAt: true },
+    select: { id: true, repositoryId: true, number: true, createdAt: true, trial: true },
   });
   let recovered = 0;
   for (const job of retryable) {
     recovered += await prisma.$transaction(async (tx) => {
       await lockEnqueue(tx, job.repositoryId, job.number);
-      const newer = await tx.reviewJob.findFirst({
-        where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt } },
-        select: { id: true },
-      });
+      // Trials and reviews never supersede each other (see enqueueTrial).
+      const newer = job.trial
+        ? null
+        : await tx.reviewJob.findFirst({
+            where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
+            select: { id: true },
+          });
       // Still stale: a heartbeat that landed since means the worker is alive.
       const { count } = await tx.reviewJob.updateMany({
         where: { id: job.id, ...stale },
@@ -461,14 +530,16 @@ export async function requeueInterrupted(jobs: { id: string; attempts: number }[
       requeued += await prisma.$transaction(async (tx) => {
         const job = await tx.reviewJob.findUnique({
           where: { id },
-          select: { repositoryId: true, number: true, createdAt: true },
+          select: { repositoryId: true, number: true, createdAt: true, trial: true },
         });
         if (!job) return 0;
         await lockEnqueue(tx, job.repositoryId, job.number);
-        const newer = await tx.reviewJob.findFirst({
-          where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt } },
-          select: { id: true },
-        });
+        const newer = job.trial
+          ? null
+          : await tx.reviewJob.findFirst({
+              where: { repositoryId: job.repositoryId, number: job.number, createdAt: { gt: job.createdAt }, trial: false },
+              select: { id: true },
+            });
         const leaseExpiresAt = new Date(Date.now() + HANDBACK_LEASE_MS);
         const { count } = await tx.reviewJob.updateMany({
           where: { id, attempts, status: "running" },

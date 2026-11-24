@@ -1,0 +1,16 @@
+title: Let owners archive projects
+description: Adds an archive endpoint next to rename.
+language: typescript
+# The defect breaks a team convention only the custom reviewer is told about,
+# so the general pass alone is not expected to find it.
+config:
+  reviewers:
+    - id: audit-trail
+      name: Audit trail
+      instructions: Every handler that writes to the database must record the write with audit(userId, action, target) before responding. Report a handler that writes without it.
+      paths: ["src/**"]
+expected:
+  - file: src/projects.ts
+    lines: [14, 20]
+    category: [reliability, logic, maintainability, security, bug]
+    description: archiveProject updates the project but never calls audit(), unlike renameProject, so archiving leaves no audit trail

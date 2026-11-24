@@ -1574,6 +1574,50 @@ one kind of defect only:
   pass alone decides what was reviewed. The review page tags each finding with
   the specialist that found it and shows how many ran.
 
+### Custom reviewers
+
+`reviewers` adds reviewers of a team's own: each one gets a pass with its own
+instructions, reports only what those ask for, and tags its comments with its
+name (`· reviewer API contracts`). Each takes:
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `id` | yes | Lowercase letters, digits, `.`, `-`, `_`; not a deep review specialist's name |
+| `name` | yes | Shown on its comments and on the review page (at most 60 characters) |
+| `instructions` | yes | What it looks for (at most 4000 characters). One kind of problem works best |
+| `paths` | no | Globs over file paths; it only reviews passes holding a file they match, and only reports on those files |
+| `severity_floor` | no | What it reports at all; defaults to `review.severity_floor` |
+| `max_findings` | no | At most this many of its findings per review, the most severe first (1 to 50) |
+| `enabled` | no | `false` keeps it in the settings without running it |
+
+- Enabled reviewers run on every review, independent of deep review. Each is
+  one more model call per review pass it covers, so a reviewer scoped with
+  `paths` to a folder the change does not touch costs nothing.
+- Like `rules`, they combine across layers: the global config, repository
+  settings, folder settings and `.sentryward.yaml` (read from the base
+  revision) each add reviewers, and an id already set below is ignored with a
+  warning, so a repository file cannot drop or redefine the workspace's. At
+  most 8 in total, with 12000 characters of names, instructions and paths.
+- A saved reviewer's instructions come only from the dashboard or the base
+  revision, and a trial's from an owner or admin's request, so they are
+  trusted like `instructions` and rules. The team rules stay with the
+  general pass.
+- Their findings go through the same validation, claim checks, verification
+  and review-wide `max_findings` cap, after their own `max_findings` (which
+  limits the findings kept, on the dashboard as well as on the change). Like
+  the review-wide cap, it counts the findings a run reports: findings an
+  incremental review carries over from files it did not review again are not
+  counted again. Like
+  specialists, they are reported whatever `review.categories` says, a reworded
+  duplicate of a general finding is merged, and a failed pass is a warning.
+- **Trial runs:** the editor on the Guidance tab can try a reviewer, saved or
+  not, on any pull or merge request (owners and admins). A trial reviews the
+  change with the draft in place of the saved custom reviewers and the
+  walkthrough off, shows the result on the review page, and posts nothing: no comments, status, labels or summary. Its
+  findings are not tracked, it never supersedes or answers the change's own
+  reviews, and it sends no notifications, but its model calls count towards
+  usage. Re-running a trial tries the same draft again.
+
 ### Ollama
 
 Add Ollama under LLM Connections and enter its OpenAI-compatible base URL. For
@@ -1673,6 +1717,13 @@ ignore_paths: ["**/*.lock", "**/dist/**"]   # example; replaces the default list
 instructions: "Controllers stay thin; business logic lives in services."   # example
 language_instructions:      # example
   typescript: "Strict mode; no any."
+reviewers:                  # example; custom reviewers, added to the dashboard ones, see "Custom reviewers" above
+  - id: api-contracts
+    name: API contracts
+    instructions: Response shapes that change without a version bump.
+    paths: ["server/src/routes/**"]
+    severity_floor: minor
+    max_findings: 5
 rules:                      # example; team rules, added to the dashboard ones, see "Review rules" below
   - id: no-db-in-controllers
     description: Controllers must not import Prisma directly; go through services.
@@ -2128,6 +2179,7 @@ rate limited (20 requests per 15 minutes per IP).
 | GET    | `/api/reviews/:id` | One review with its full result (see below) |
 | GET    | `/api/reviews/:id/markdown` | The review as the markdown document that is posted to the forge |
 | POST   | `/api/reviews/:id/rerun` | Queues a fresh review of the PR's latest head |
+| POST   | `/api/reviews/trial` | Tries a custom reviewer on a change without posting anything: `{ url \| repoId + number, reviewer }`; owners and admins |
 | POST   | `/api/reviews/:id/cancel` | Cancels a queued or running review; a running one stops within one check interval (about 15s) and posts nothing more. `409` once it has finished |
 
 - `GET /api/reviews/stats`: `cost.usd` is the summed costs reviews recorded when

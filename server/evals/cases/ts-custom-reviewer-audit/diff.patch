@@ -1,0 +1,16 @@
+diff --git a/src/projects.ts b/src/projects.ts
+index 6a8d27a..033de8c 100644
+--- a/src/projects.ts
++++ b/src/projects.ts
+@@ -10,3 +10,11 @@ export async function renameProject(req: Request, res: Response) {
+   await audit(req.userId, "project.rename", project.id);
+   res.json({ project });
+ }
++
++export async function archiveProject(req: Request, res: Response) {
++  const project = await db.project.update({
++    where: { id: req.params.id, ownerId: req.userId },
++    data: { archivedAt: new Date() },
++  });
++  res.json({ project });
++}

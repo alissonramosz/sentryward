@@ -46,6 +46,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { DragHandle } from "@/features/forge/SortableGrid"
+import { ReviewersField } from "./ReviewersField"
 import { cn } from "@/lib/utils"
 import {
   STATUS_LABELS,
@@ -2568,6 +2569,19 @@ export function ConfigFields(props: {
           patternErrors={props.rulePatternErrors}
           error={errors.rules}
           disabled={disabled}
+        />
+        <ReviewersField
+          rows={form.reviewers}
+          onChange={(reviewers) => props.onChange({ ...form, reviewers })}
+          isRepo={isRepo}
+          severities={schema.data?.severities ?? []}
+          inherited={inherited?.reviewers}
+          inheritedSources={props.inheritedSources}
+          sourceLabel={(source) => SOURCE_LABEL[source] ?? source}
+          error={errors.reviewers}
+          disabled={disabled}
+          // Whoever can edit these settings may try a reviewer on a change.
+          canTry={!disabled}
         />
       </>
     ),

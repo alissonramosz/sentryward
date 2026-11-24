@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { pickDirectory } from "../src/review/config/directories.ts";
-import { loadReviewConfig, repoSettingsRuleIssues } from "../src/review/config/load.ts";
+import { loadReviewConfig, repoSettingsCombinedIssues } from "../src/review/config/load.ts";
 import { resolveConfig } from "../src/review/config/resolve.ts";
 import { directorySettingsSchema, type DirectorySetting } from "../src/review/config/schema.ts";
 import type { ForgeAdapter } from "../src/review/forge/types.ts";
@@ -150,9 +150,9 @@ describe("loadReviewConfig with folders", () => {
   });
 });
 
-describe("repoSettingsRuleIssues with folders", () => {
+describe("repoSettingsCombinedIssues with folders", () => {
   it("reports a folder rule clash with the folder's index and path", () => {
-    const issues = repoSettingsRuleIssues({
+    const issues = repoSettingsCombinedIssues({
       globalSettings: { rules: [{ id: "shared", description: "Strict.", severity: "critical" }] },
       repoSettings: {},
       directories: [web, { path: "api", settings: { rules: [{ id: "shared", description: "Weaker.", severity: "info" }] } }],

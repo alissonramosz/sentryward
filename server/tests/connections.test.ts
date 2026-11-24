@@ -422,6 +422,10 @@ describe("GET /api/connections/:id", () => {
         },
       });
     }
+    // The newest run is a trial, which is not one of the connection's reviews.
+    await prisma.reviewJob.create({
+      data: { repositoryId: hooked.id, number: 7, headSha: "h", trigger: "manual", trial: true, createdAt: new Date(Date.UTC(2026, 0, 7)) },
+    });
 
     const res = await request(app).get(`/api/connections/${connection.id}`).set("Cookie", cookie);
 
