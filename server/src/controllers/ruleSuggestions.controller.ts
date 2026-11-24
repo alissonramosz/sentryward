@@ -324,7 +324,7 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
         throw new HttpError(409, "This repository follows the global settings, so its own rules would be ignored: choose Global, or give it settings of its own first");
       }
       const settings = withRule(saved.settings, rule, "repository");
-      requireRepoSettingsLists(workspace!.review_settings, saved, settings, false);
+      requireRepoSettingsLists(workspace!.review_settings, saved, settings, false, ["rules"]);
       await tx.repository.update({ where: { id: repo.id }, data: { settings } });
       appliedTarget = repo.id;
     }

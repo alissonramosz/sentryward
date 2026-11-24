@@ -1499,6 +1499,10 @@ describe("reviewSteps", () => {
     expect(reviewSteps(withSettings("blocking", false))).toEqual(["fetching", "preparing", "reviewing", "verifying"]);
   });
 
+  it("leaves publishing out for a run that posts nothing whatever its settings", () => {
+    expect(reviewSteps(withSettings("off", true), { publishing: false })).toEqual(["fetching", "preparing", "reviewing"]);
+  });
+
   it("lists verifying for claim checks without the verifier", () => {
     expect(reviewSteps(withSettings("off", true, true))).toEqual(["fetching", "preparing", "reviewing", "verifying", "publishing"]);
   });

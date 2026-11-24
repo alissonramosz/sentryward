@@ -298,13 +298,13 @@ async function runClaimedJob(job: ReviewJob, deps: RunJobDeps, progress: Progres
     return;
   }
 
-  progress.plan(reviewSteps(config));
+  // A trial posts nothing: no progress note, comments or commit status.
+  const publishing = !job.trial && publishes(config);
+  progress.plan(reviewSteps(config, { publishing }));
   progress.set({ stage: "preparing" });
   // A trial is read for its reviewer's findings, so it skips the walkthrough
   // rather than pay for a summary nobody will see posted.
   const walkthrough = !job.trial && walkthroughEnabled(job.trigger, config, changeSet.isDraft);
-  // A trial posts nothing: no progress note, comments or commit status.
-  const publishing = !job.trial && publishes(config);
   // Only the models this review will call are checked, so a walkthrough or
   // verify model left set while that pass is off does not fail the job.
   const primary = [modelChain(config.llm, "review")[0]];

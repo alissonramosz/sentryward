@@ -948,4 +948,11 @@ describe("enqueueFromWebhook", () => {
       reason: "queue_full",
     });
   });
+
+  it("does not count queued trials toward the queue cap", async () => {
+    for (let n = 1; n <= 10; n++) await trial(`t${n}`, 5);
+    expect(await enqueueFromWebhook({ repositoryId, number: 99, headSha: "z", trigger: "webhook" })).toMatchObject({
+      queued: true,
+    });
+  });
 });

@@ -15,14 +15,17 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   (`max_findings`), in the global, repository or folder settings (new editor on
   the Guidance tab) or `.sentryward.yaml`. Like rules they combine across
   layers: a layer adds reviewers and an id already set below is ignored with a
-  warning, and saves that would leave one out are refused under `reviewers`.
+  warning, and saves that would leave one out are refused under `reviewers`
+  (approving a rule suggestion into a repository is refused only for rule
+  problems, not for a reviewer clash it did not cause).
   Every enabled reviewer gets one pass per planned chunk holding a file it
   covers, its instructions in place of the team rules; its findings carry
   `reviewer` and `reviewerName`, are tagged `· reviewer <name>` in forge
   comments and "Reviewer: <name>" on the review page, skip the category
   filter, are dropped as `reviewer_mismatch` on files outside its paths, and
   are capped per reviewer before `max_findings` (a finding the general pass
-  also reported is not counted against the reviewer's limit). Adding,
+  also reported, or one an incremental review carries over, is not counted
+  against the reviewer's limit). Adding,
   removing or changing a reviewer makes the next push a full review. A failed
   reviewer pass is a warning. The review sidebar lists the custom reviewers
   that ran.
@@ -33,8 +36,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   walkthrough and posts, syncs and notifies nothing. Trials never supersede,
   answer or block the change's reviews, are not an incremental base, a
   previous verdict or the backlog's source, and are left out of the change
-  view and review stats, the failed-reviews badge, the blocked digest, each
-  repository's last review, and the backlog's merge and sweep waits; retention
+  view and review stats, benchmarks, a connection's recent reviews, the
+  failed-reviews badge, the blocked digest, each repository's last review, the
+  webhook's per-repository queue cap, and the backlog's merge and sweep waits;
+  a trial's progress shows no publishing step; retention
   never keeps a trial as a change's newest run, nor trims a real review
   because a trial ran after it. Re-running one tries the same draft. The config a
   trial stores keeps only the draft's id and name, since every member can

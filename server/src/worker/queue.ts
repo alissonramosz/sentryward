@@ -175,8 +175,10 @@ export async function enqueueFromWebhook(input: EnqueueInput): Promise<WebhookEn
     });
     if (seen) return { queued: false, reason: "duplicate" };
 
+    // Trials never block a change's reviews, so queued ones do not count
+    // toward the cap: an admin trying a reviewer must not stop push reviews.
     const queued = await tx.reviewJob.count({
-      where: { repositoryId: input.repositoryId, status: "queued", number: { not: input.number } },
+      where: { repositoryId: input.repositoryId, status: "queued", number: { not: input.number }, trial: false },
     });
     if (queued >= MAX_QUEUED_PER_REPOSITORY) return { queued: false, reason: "queue_full" };
 

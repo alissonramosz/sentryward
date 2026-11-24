@@ -6,6 +6,7 @@ import { MISSING_REVISION_MESSAGE, settingsRevision } from "../lib/settingsRevis
 import { dropRepositoriesFromTargets } from "../services/notifications.ts";
 import { loadReviewConfig, repoSettingsCombinedIssues, resolveDashboardLayers } from "../review/config/load.ts";
 import { directorySettingsSchema, normalizeDirectory, type DashboardOverride, type DirectorySetting } from "../review/config/schema.ts";
+import type { CombinedIssue } from "../review/config/resolve.ts";
 import { hostOrigin } from "../review/forge/types.ts";
 import { adapterForConnection, loadWorkspaceConnection, toHttpError } from "../services/forge.ts";
 import { requireStoredLlmConnection } from "../services/llm.ts";
@@ -278,13 +279,17 @@ async function lockForRules(tx: Prisma.TransactionClient, workspaceId: string, i
 // repository entry taking a folder entry's id, or a combined limit), since the
 // folder would otherwise lose them with only a review warning. A folder that was already broken
 // before this save stays a warning, so it does not block unrelated edits.
+// `lists` limits the check to the lists a save changes: a rule approval only
+// adds a rule, so a reviewer clash it did not cause must not refuse it.
 export function requireRepoSettingsLists(
   globalSettings: unknown,
   saved: { settings: unknown; directories: unknown },
   settings: unknown,
   followGlobal: boolean,
+  lists?: CombinedIssue["list"][],
 ) {
-  const after = repoSettingsCombinedIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal });
+  const after = repoSettingsCombinedIssues({ globalSettings, repoSettings: settings, directories: saved.directories, followGlobal })
+    .filter((issue) => !lists || lists.includes(issue.list));
   if (!after.length) return;
   const key = (issue: { directory?: number; message: string }) => `${issue.directory}:${issue.message}`;
   const before = new Set(

@@ -260,6 +260,18 @@ describe("GET /api/benchmarks", () => {
     expect(scoped.body.totals.findings.found).toBe(0);
   });
 
+  it("leaves trials out of the benchmarks", async () => {
+    await run(repoId, 1, { [SONNET]: usage() });
+    await prisma.reviewJob.create({
+      data: { repositoryId: repoId, number: 2, headSha: "h", trigger: "manual", status: "completed", trial: true, summary: { title: "t", total: 0, usageByModel: { [HAIKU]: usage() }, duplicates: 0 } as object },
+    });
+
+    const res = await request(app).get("/api/benchmarks?period=30d").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.totals).toMatchObject({ reviews: 1 });
+    expect(res.body.byModel.map((row: { model: string }) => row.model)).toEqual([SONNET]);
+  });
+
   it("shows nothing of another workspace and rejects bad queries", async () => {
     await run(repoId, 1, { [SONNET]: usage() });
     const other = await createUser("other@example.com");

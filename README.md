@@ -1605,6 +1605,9 @@ name (`· reviewer API contracts`). Each takes:
 - Their findings go through the same validation, claim checks, verification
   and review-wide `max_findings` cap, after their own `max_findings` (which
   limits the findings kept, on the dashboard as well as on the change). Like
+  the review-wide cap, it counts the findings a run reports: findings an
+  incremental review carries over from files it did not review again are not
+  counted again. Like
   specialists, they are reported whatever `review.categories` says, a reworded
   duplicate of a general finding is merged, and a failed pass is a warning.
 - **Trial runs:** the editor on the Guidance tab can try a reviewer, saved or
