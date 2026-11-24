@@ -324,8 +324,8 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
   for (const outcome of outcomes) {
     // Specialists and custom reviewers alike: extra passes over chunks the
     // general pass covers.
-    const specialist = outcome.lens.kind !== "general";
-    if (outcome.review && specialist && failedGeneral.has(outcome.chunk.index)) {
+    const extraPass = outcome.lens.kind !== "general";
+    if (outcome.review && extraPass && failedGeneral.has(outcome.chunk.index)) {
       if (outcome.lens.kind === "custom") orphanedCustom += outcome.review.findings.length;
       else orphaned += outcome.review.findings.length;
       usage.push(...tagLens(outcome.lens, [...outcome.review.failedUsage, outcome.review.usage]));
@@ -338,7 +338,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       // one it was checking; the general pass reports rule violations.
       raw.push(
         ...outcome.review.findings.map((finding) =>
-          specialist ? { ...finding, ruleId: null, model, reviewer: outcome.lens.id } : { ...finding, model },
+          extraPass ? { ...finding, ruleId: null, model, reviewer: outcome.lens.id } : { ...finding, model },
         ),
       );
       usage.push(...tagLens(outcome.lens, [...outcome.review.failedUsage, outcome.review.usage]));
@@ -348,7 +348,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
     usage.push(...tagLens(outcome.lens, outcome.spent));
     // The general pass alone decides coverage: a failed specialist leaves the
     // change reviewed, only less deeply.
-    if (specialist) {
+    if (extraPass) {
       warnings.push(
         outcome.lens.kind === "custom"
           ? `Custom reviewer ${outcome.lens.name ?? outcome.lens.id} on pass ${outcome.chunk.index} failed: ${outcome.error}`

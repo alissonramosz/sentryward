@@ -238,14 +238,11 @@ describe("rendering", () => {
 });
 
 describe("trial config", () => {
-  it("adds the draft, switched on, in place of a saved reviewer with its id", () => {
+  it("runs only the draft, switched on, in place of every saved reviewer", () => {
     const saved = withReviewers([reviewer(), reviewer({ id: "docs", name: "Docs" })]);
     const draft = reviewer({ name: "API contracts v2", enabled: false });
     const trial = withTrialReviewer(saved, { trial: true, trialReviewer: draft });
-    expect(trial.reviewers.map((r) => [r.id, r.name, r.enabled])).toEqual([
-      ["docs", "Docs", undefined],
-      ["api-contracts", "API contracts v2", true],
-    ]);
+    expect(trial.reviewers.map((r) => [r.id, r.name, r.enabled])).toEqual([["api-contracts", "API contracts v2", true]]);
     expect(withTrialReviewer(saved, { trial: false, trialReviewer: null })).toBe(saved);
   });
 

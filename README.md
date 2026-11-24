@@ -1609,8 +1609,8 @@ name (`· reviewer API contracts`). Each takes:
   duplicate of a general finding is merged, and a failed pass is a warning.
 - **Trial runs:** the editor on the Guidance tab can try a reviewer, saved or
   not, on any pull or merge request (owners and admins). A trial reviews the
-  change with the draft added and the walkthrough off, shows the result on the
-  review page, and posts nothing: no comments, status, labels or summary. Its
+  change with the draft in place of the saved custom reviewers and the
+  walkthrough off, shows the result on the review page, and posts nothing: no comments, status, labels or summary. Its
   findings are not tracked, it never supersedes or answers the change's own
   reviews, and it sends no notifications, but its model calls count towards
   usage. Re-running a trial tries the same draft again.

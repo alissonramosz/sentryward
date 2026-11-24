@@ -158,19 +158,17 @@ function connectionRefused(connection: ForgeConnection, deps: RunJobDeps): Promi
 
 export const TRIAL_WARNING = "Trial run: nothing was posted to the change, and its findings are not tracked";
 
-// A trial runs the change's resolved config with its draft reviewer added, on
-// even if the draft is switched off. A saved reviewer with the same id is the
-// one being edited, so the draft replaces it rather than running beside it.
-// The draft was validated on its own when the trial was queued; the combined
-// limits are not applied, since nothing is saved.
+// A trial runs the change's resolved config with its custom reviewers replaced
+// by the draft, on even if the draft is switched off: the result shows what the
+// draft alone finds, and nothing is spent on the saved reviewers. The general
+// pass, and the deep review's specialists when it is on, still run, since the
+// draft's findings are judged beside them. The draft was validated on its own
+// when the trial was queued.
 export function withTrialReviewer(config: Config, job: Pick<ReviewJob, "trial" | "trialReviewer">): Config {
   if (!job.trial) return config;
   const draft = customReviewerSchema.safeParse(job.trialReviewer);
   if (!draft.success) throw new Error("The trial's reviewer is no longer valid; start a new trial from the settings");
-  return {
-    ...config,
-    reviewers: [...config.reviewers.filter((reviewer) => reviewer.id !== draft.data.id), { ...draft.data, enabled: true }],
-  };
+  return { ...config, reviewers: [{ ...draft.data, enabled: true }] };
 }
 
 // The config a trial stores keeps only the draft's id and name (what the

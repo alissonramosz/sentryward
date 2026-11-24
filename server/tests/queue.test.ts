@@ -64,6 +64,21 @@ const job = (headSha: string, number = 7) =>
 const trial = (headSha: string, number = 7) =>
   enqueueTrial({ repositoryId, number, headSha, reviewer: { id: "draft", name: "Draft", instructions: "Look for draft issues." } });
 
+// Waits until this many other sessions are blocked on a lock, so a race test
+// can order its steps by what each one is waiting for rather than by sleeping.
+// Test files run one at a time, so no other session is holding locks here.
+async function waitForLockWaiters(count: number): Promise<void> {
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    const [{ waiting }] = await prisma.$queryRaw<{ waiting: number }[]>`
+      SELECT count(*)::int AS waiting FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+    if (waiting >= count) return;
+    if (Date.now() > deadline) throw new Error(`Expected ${count} sessions waiting on a lock, saw ${waiting}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 const HOUR_AGO = () => new Date(Date.now() - 60 * 60 * 1000);
 const expireLease = (id: string) => prisma.reviewJob.update({ where: { id }, data: { leaseExpiresAt: HOUR_AGO() } });
 
@@ -422,20 +437,25 @@ describe("enqueueTrial", () => {
   });
 
   it("is cancelled by a turn-off that starts while it is being queued", async () => {
+    let queueing!: Promise<unknown>;
     let disabling!: Promise<number>;
+    // Holding review_jobs in SHARE mode stops the real enqueueTrial at its
+    // insert, after it has checked the repository and taken its share lock. The
+    // turn-off then has to wait on that lock; it only waits if enqueueTrial
+    // took it, so a missing lock times out below instead of passing.
     await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM repositories WHERE id = ${repositoryId}::uuid FOR SHARE`;
-      await tx.reviewJob.create({
-        data: { repositoryId, number: 7, headSha: "aaa", trigger: "manual", trial: true, trialReviewer: {} },
-      });
+      await tx.$executeRaw`LOCK TABLE review_jobs IN SHARE MODE`;
+      queueing = trial("aaa");
+      await waitForLockWaiters(1);
       disabling = prisma.$transaction(async (other) => {
         await other.repository.update({ where: { id: repositoryId }, data: { enabled: false } });
         return cancelForDisabledRepositories([repositoryId], DISABLED_REASON, other);
       });
-      // Long enough for the turn-off to reach the row lock before this trial commits.
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await waitForLockWaiters(2);
     });
 
+    const queued = await queueing;
+    expect(queued).toMatchObject({ trial: true });
     expect(await disabling).toBe(1);
     expect(await prisma.reviewJob.findFirstOrThrow()).toMatchObject({ status: "cancelled", error: DISABLED_REASON });
   });

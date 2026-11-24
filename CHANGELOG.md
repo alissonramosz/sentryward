@@ -24,8 +24,9 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   are capped per reviewer before `max_findings`. A failed reviewer pass is a
   warning. The review sidebar lists the custom reviewers that ran.
 - Trial runs of a custom reviewer: `POST /api/reviews/trial` (owners and
-  admins; by URL, or repository and number) queues a review with the draft
-  added (`review_jobs.trial`, `review_jobs.trial_reviewer`), which skips the
+  admins; by URL, or repository and number) queues a review that runs the
+  draft in place of the saved custom reviewers (`review_jobs.trial`,
+  `review_jobs.trial_reviewer`), which skips the
   walkthrough and posts, syncs and notifies nothing. Trials never supersede,
   answer or block the change's reviews, are not an incremental base, a
   previous verdict or the backlog's source, and are left out of the change
