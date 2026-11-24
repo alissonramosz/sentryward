@@ -150,6 +150,10 @@ describe("repository order and latest review", () => {
     const newest = await job("running", 2, "2026-01-02");
     await job("skipped", 3, "2026-01-03");
     await job("superseded", 4, "2026-01-04");
+    // A trial never speaks for its change, so it is not the latest review.
+    await prisma.reviewJob.create({
+      data: { repositoryId: api.id, number: 1, headSha: "h", trigger: "manual", status: "completed", trial: true, createdAt: new Date("2026-01-05") },
+    });
 
     const res = await request(app).get("/api/repos/last-reviews").set("Cookie", cookie);
 

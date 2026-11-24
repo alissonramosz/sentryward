@@ -420,7 +420,7 @@ export async function runReview(input: RunReviewInput, deps: ReviewDeps): Promis
       warnings.push(`Claim checks failed, the findings were kept: ${errorMessage(err)}`);
     }
   }
-  const perReviewer = capPerReviewer(claims.findings, config);
+  const perReviewer = capPerReviewer(claims.findings, config, lensed.shared);
   const limited = capFindings(perReviewer.findings, config.review.maxFindings);
   const cappedCount = perReviewer.overLimit + limited.overLimit;
   if (cappedCount > 0) validation.dropped.over_limit = cappedCount;

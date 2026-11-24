@@ -310,7 +310,8 @@ function membershipKey(req: Request) {
 // Counted by when they failed, so a run queued before the last visit that
 // fails after it still counts. Only a change's latest run counts, as on the
 // list's default view: a failure already followed by a rerun is not news. Must
-// stay in step with listChanges, or the badge names failures the list hides.
+// stay in step with listChanges, or the badge names failures the list hides:
+// so trials are left out on both sides, neither failing nor replacing a run.
 export async function getReviewAttention(req: Request, res: Response) {
   const membership = await prisma.membership.findUnique({
     where: { userId_workspaceId: membershipKey(req) },
@@ -327,6 +328,7 @@ export async function getReviewAttention(req: Request, res: Response) {
     JOIN forge_connections c ON c.id = r.connection_id
     WHERE c.workspace_id = ${req.workspaceId!}::uuid
       AND j.status = 'failed'
+      AND j.trial = false
       AND j.finished_at > ${since}
       AND NOT EXISTS (
         SELECT 1 FROM review_jobs n
@@ -334,6 +336,7 @@ export async function getReviewAttention(req: Request, res: Response) {
           AND n.number = j.number
           AND n.created_at > j.created_at
           AND n.status <> 'superseded'
+          AND n.trial = false
       )
   `;
   res.json({ failed, since: since.toISOString() });

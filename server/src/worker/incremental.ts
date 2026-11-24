@@ -39,6 +39,10 @@ function reviewSettings(config: Config) {
       // Configs stored before rules existed have none, which is no rules, so
       // they do not force a full review.
       rules: config.rules ?? [],
+      // A reviewer added, removed or rescoped changes which files get its
+      // pass, and carried findings would keep a removed one's reports. As
+      // with rules, configs stored before reviewers existed have none.
+      reviewers: config.reviewers ?? [],
     }),
   ) as unknown;
 }

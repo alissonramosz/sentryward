@@ -92,13 +92,14 @@ interface LatestReviewRow {
 
 // Each repository's newest review in one query, rather than a nested include
 // that would load every job. Skipped runs reviewed nothing and superseded ones
-// were replaced by a newer run, so neither counts.
+// were replaced by a newer run, so neither counts; a trial never speaks for
+// its change, so it is not a repository's latest review either.
 async function latestReviews(repositoryIds: string[]) {
   if (!repositoryIds.length) return new Map();
   const rows = await prisma.$queryRaw<LatestReviewRow[]>(Prisma.sql`
     SELECT DISTINCT ON (repository_id) id, repository_id, number, status, verdict, created_at
     FROM review_jobs
-    WHERE repository_id = ANY(${repositoryIds}::uuid[]) AND status NOT IN ('skipped', 'superseded')
+    WHERE repository_id = ANY(${repositoryIds}::uuid[]) AND status NOT IN ('skipped', 'superseded') AND trial = false
     ORDER BY repository_id, created_at DESC`);
   return new Map(
     rows.map((row) => [

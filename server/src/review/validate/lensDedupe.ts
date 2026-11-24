@@ -43,8 +43,10 @@ function sameProblem(a: Finding, b: Finding): boolean {
 // that. Only reports from different passes are merged, so this never changes
 // what a review without deep mode reports. The general pass is considered
 // first and keeps its report on a tie. Returned in compareFindings order, as
-// the cap that follows expects.
-export function mergeAcrossLenses(findings: Finding[]): { findings: Finding[]; merged: number } {
+// the cap that follows expects. `shared` holds the fingerprints of kept
+// reports tagged with a lens that the general pass also made: the general pass
+// would have reported them alone, so no lens's own limit may drop them.
+export function mergeAcrossLenses(findings: Finding[]): { findings: Finding[]; merged: number; shared: Set<string> } {
   const ordered = [...findings].sort((a, b) => Number(a.reviewer !== undefined) - Number(b.reviewer !== undefined));
   const kept: Finding[] = [];
   // Every pass that reported each kept problem (undefined is the general
@@ -64,5 +66,8 @@ export function mergeAcrossLenses(findings: Finding[]): { findings: Finding[]; m
     contributors[index]!.add(finding.reviewer);
     merged += 1;
   }
-  return { findings: kept.sort(compareFindings), merged };
+  const shared = new Set(
+    kept.flatMap((finding, i) => (finding.reviewer !== undefined && contributors[i]!.has(undefined) ? [finding.fingerprint] : [])),
+  );
+  return { findings: kept.sort(compareFindings), merged, shared };
 }

@@ -261,6 +261,8 @@ export async function stillBlockedChanges(
       WHERE r.repository_id = b.repository_id
         AND r.number = b.number
         AND r.status IN ('completed', 'partial')
+        -- A trial never speaks for the change, so it cannot unblock it.
+        AND r.trial = false
         AND r.finished_at <= ${until}
       ORDER BY r.finished_at DESC, r.created_at DESC
       LIMIT 1

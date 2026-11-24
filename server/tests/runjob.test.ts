@@ -1720,6 +1720,21 @@ describe("runJob on a push after a completed review", () => {
     expect(((await stored()).result as { incremental?: unknown }).incremental).toBeDefined();
   });
 
+  it("still reviews incrementally after a review stored before custom reviewers existed", async () => {
+    await reviewFirst();
+    const last = await prisma.reviewJob.findFirstOrThrow({ where: { repositoryId, headSha: "h1" } });
+    const resolved = structuredClone(last.resolvedConfig) as { config: { reviewers?: unknown } };
+    delete resolved.config.reviewers;
+    await prisma.reviewJob.update({ where: { id: last.id }, data: { resolvedConfig: resolved as object } });
+    const second = deps({}, fixed, { anthropic: "k" }, { head: "h2", files: FILES, compare: ["src/util.ts"] });
+    const { job, stored } = await push("h2");
+
+    await runJob(job, second.runDeps);
+
+    expect(second.reads).toContain("compare:h1..h2");
+    expect(((await stored()).result as { incremental?: unknown }).incremental).toBeDefined();
+  });
+
   it("still reviews incrementally after a review stored before impact depth existed", async () => {
     await reviewFirst();
     const last = await prisma.reviewJob.findFirstOrThrow({ where: { repositoryId, headSha: "h1" } });
@@ -1759,6 +1774,7 @@ describe("runJob on a push after a completed review", () => {
   it.each([
     ["the model settings", { llm: { temperature: 0.7 } }],
     ["the ignored paths", { ignorePaths: ["src/app.ts"] }],
+    ["the custom reviewers", { reviewers: [{ id: "api-contracts", name: "API contracts", instructions: "Response shapes." }] }],
   ])("reviews everything when %s changed since the last review", async (_, change) => {
     await reviewFirst();
     await prisma.repository.update({

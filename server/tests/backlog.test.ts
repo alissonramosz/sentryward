@@ -345,6 +345,16 @@ describe("applyPendingMerges", () => {
     expect((await applyPendingMerges()).applied).toBe(0);
   });
 
+  it("does not wait for a trial: it syncs no findings", async () => {
+    await finding(7, "fp-old");
+    await prisma.reviewJob.create({
+      data: { repositoryId: repoId, number: 7, headSha: "head", trigger: "manual", status: "queued", trial: true },
+    });
+    expect(await record(7)).toBe(true);
+    expect((await applyPendingMerges()).applied).toBe(1);
+    expect((await items()).map((item) => item.fingerprint)).toEqual(["fp-old"]);
+  });
+
   it("replays a later merge against the items of an earlier merge applied late", async () => {
     const early = new Date("2026-11-10T09:00:00Z");
     const later = new Date("2026-11-11T09:00:00Z");
@@ -399,6 +409,24 @@ describe("sweepClosedChanges", () => {
     asked.length = 0;
     expect(await sweepClosedChanges({ now: new Date(now.getTime() + HOUR_MS), forgeFor })).toEqual({ checked: 1, merged: 0, failed: 0 });
     expect(asked).toEqual([9]);
+  });
+
+  it("does not count a recent or running trial as activity on the change", async () => {
+    await finding(7, "fp", { lastSeenAt: new Date(now.getTime() - 2 * HOUR_MS) });
+    await prisma.reviewJob.createMany({
+      data: [
+        { repositoryId: repoId, number: 7, headSha: "head", trigger: "manual", status: "running", trial: true, createdAt: new Date(now.getTime() - 60_000) },
+      ],
+    });
+    const asked: number[] = [];
+    const forgeFor = () => ({
+      getChangeDetails: async (_project: string, number: number) => {
+        asked.push(number);
+        return details("open");
+      },
+    });
+    expect(await sweepClosedChanges({ now, forgeFor })).toEqual({ checked: 1, merged: 0, failed: 0 });
+    expect(asked).toEqual([7]);
   });
 
   it("counts a failed check and waits before asking again", async () => {

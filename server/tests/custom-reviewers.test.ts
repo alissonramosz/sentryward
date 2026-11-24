@@ -16,6 +16,7 @@ import type { GenerateRequest } from "../src/review/llm/providers.ts";
 import { ModelCallError } from "../src/review/llm/providers.ts";
 import { runReview } from "../src/review/pipeline.ts";
 import { inlineBody } from "../src/review/publish/inline.ts";
+import { mergeAcrossLenses } from "../src/review/validate/lensDedupe.ts";
 import { capPerReviewer } from "../src/review/validate/validator.ts";
 import { withTrialReviewer } from "../src/worker/runJob.ts";
 import { APP_PATCH, makeChangeSet } from "./helpers/changeSet.ts";
@@ -226,6 +227,24 @@ describe("capPerReviewer", () => {
     const cfg = withReviewers([reviewer({ maxFindings: 1 })]);
     const findings = [finding({ title: "a" }), finding({ title: "b" }), finding({ title: "c", reviewer: "api-contracts" })];
     expect(capPerReviewer(findings, cfg)).toEqual({ findings, overLimit: 0 });
+  });
+
+  it("does not count a finding the general pass also made against the reviewer's limit", () => {
+    const cfg = withReviewers([reviewer({ maxFindings: 1 })]);
+    // The reviewer's stronger report of the general pass's problem replaces it
+    // and keeps its tag, but the general pass would have published it alone.
+    const lensed = mergeAcrossLenses([
+      finding({ title: "The response drops the id field", severity: "minor", fingerprint: "g" }),
+      finding({ title: "Response drops the id field silently", reviewer: "api-contracts", fingerprint: "c1" }),
+      finding({ title: "Status code changed", reviewer: "api-contracts", severity: "critical", startLine: 12, endLine: 12, fingerprint: "c2" }),
+      finding({ title: "Pagination cursor renamed", reviewer: "api-contracts", severity: "minor", startLine: 13, endLine: 13, fingerprint: "c3" }),
+    ]);
+    expect(lensed.merged).toBe(1);
+    expect([...lensed.shared]).toEqual(["c1"]);
+    const capped = capPerReviewer(lensed.findings, cfg, lensed.shared);
+    // c3 is the reviewer's alone, so its limit still drops it.
+    expect(capped.findings.map((f) => f.fingerprint)).toEqual(["c2", "c1"]);
+    expect(capped.overLimit).toBe(1);
   });
 });
 

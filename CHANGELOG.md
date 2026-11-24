@@ -21,8 +21,11 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   `reviewer` and `reviewerName`, are tagged `· reviewer <name>` in forge
   comments and "Reviewer: <name>" on the review page, skip the category
   filter, are dropped as `reviewer_mismatch` on files outside its paths, and
-  are capped per reviewer before `max_findings`. A failed reviewer pass is a
-  warning. The review sidebar lists the custom reviewers that ran.
+  are capped per reviewer before `max_findings` (a finding the general pass
+  also reported is not counted against the reviewer's limit). Adding,
+  removing or changing a reviewer makes the next push a full review. A failed
+  reviewer pass is a warning. The review sidebar lists the custom reviewers
+  that ran.
 - Trial runs of a custom reviewer: `POST /api/reviews/trial` (owners and
   admins; by URL, or repository and number) queues a review that runs the
   draft in place of the saved custom reviewers (`review_jobs.trial`,
@@ -30,7 +33,10 @@ While Sentryward is pre-1.0, minor versions may include breaking changes.
   walkthrough and posts, syncs and notifies nothing. Trials never supersede,
   answer or block the change's reviews, are not an incremental base, a
   previous verdict or the backlog's source, and are left out of the change
-  view and review stats; re-running one tries the same draft. The config a
+  view and review stats, the failed-reviews badge, the blocked digest, each
+  repository's last review, and the backlog's merge and sweep waits; retention
+  never keeps a trial as a change's newest run, nor trims a real review
+  because a trial ran after it. Re-running one tries the same draft. The config a
   trial stores keeps only the draft's id and name, since every member can
   read it. A trial queued while its repository is being turned off is refused
   (409) rather than left queued, and one queued as its change closes is

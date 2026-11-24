@@ -473,6 +473,19 @@ describe("GET /api/reviews/attention", () => {
     expect((await request(app).get("/api/reviews/attention").set("Cookie", other.cookie)).body.failed).toBe(0);
   });
 
+  it("leaves trials out: a failed one is not counted and a later one hides nothing", async () => {
+    await prisma.reviewJob.createMany({
+      data: [
+        { ...failedRun(1, ago(60_000)), trial: true },
+        { ...failedRun(2, ago(3_600_000)), createdAt: ago(3_700_000) },
+        { ...failedRun(2, ago(60_000), "completed"), trial: true, createdAt: ago(120_000) },
+      ],
+    });
+
+    const res = await request(app).get("/api/reviews/attention").set("Cookie", cookie);
+    expect(res.body.failed).toBe(1);
+  });
+
   it("only counts runs that failed after the last visit, per workspace", async () => {
     await prisma.reviewJob.create({ data: failedRun(1, ago(60_000)) });
     const user = await prisma.user.findFirstOrThrow({ where: { email: "dev@example.com" } });

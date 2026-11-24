@@ -311,13 +311,19 @@ export function validateFindings(
 // At most a custom reviewer's maxFindings of its findings, the most severe
 // first; findings arrive sorted by compareFindings, so the first ones are kept.
 // Applied before the review-wide cap, so one chatty reviewer cannot use up
-// the slots the general pass needs.
-export function capPerReviewer(findings: Finding[], config: Config): { findings: Finding[]; overLimit: number } {
+// the slots the general pass needs. A finding in `shared` (mergeAcrossLenses:
+// the general pass reported it too) neither counts nor is dropped, as the
+// general pass would have published it without the reviewer.
+export function capPerReviewer(
+  findings: Finding[],
+  config: Config,
+  shared: ReadonlySet<string> = new Set(),
+): { findings: Finding[]; overLimit: number } {
   const limits = new Map(config.reviewers.flatMap((reviewer) => (reviewer.maxFindings ? [[reviewer.id, reviewer.maxFindings] as const] : [])));
   if (!limits.size) return { findings, overLimit: 0 };
   const counts = new Map<string, number>();
   const kept = findings.filter((finding) => {
-    const limit = finding.reviewer !== undefined ? limits.get(finding.reviewer) : undefined;
+    const limit = finding.reviewer !== undefined && !shared.has(finding.fingerprint) ? limits.get(finding.reviewer) : undefined;
     if (limit === undefined) return true;
     const count = (counts.get(finding.reviewer!) ?? 0) + 1;
     counts.set(finding.reviewer!, count);

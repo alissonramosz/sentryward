@@ -406,7 +406,8 @@ export interface ApplyResult {
 
 // Applies recorded merges, oldest first, skipping a change while a review of
 // it is queued or running: that review syncs the change's findings when it
-// finishes, and the merge must promote those, not the ones before it.
+// finishes, and the merge must promote those, not the ones before it. A trial
+// syncs no findings, so there is nothing to wait for.
 export async function applyPendingMerges({ batchSize = 25 }: { batchSize?: number } = {}): Promise<ApplyResult> {
   const pending = await prisma.$queryRaw<{ repository_id: string; number: number }[]>`
     SELECT s.repository_id, s.number
@@ -415,6 +416,7 @@ export async function applyPendingMerges({ batchSize = 25 }: { batchSize?: numbe
       AND NOT EXISTS (
         SELECT 1 FROM review_jobs j
         WHERE j.repository_id = s.repository_id AND j.number = s.number AND j.status IN ('queued', 'running')
+          AND j.trial = false
       )
     ORDER BY s.closed_at NULLS LAST, s.checked_at
     LIMIT ${batchSize}
