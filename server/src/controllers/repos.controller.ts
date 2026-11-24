@@ -237,11 +237,11 @@ export async function updateRepo(req: Request, res: Response) {
         if (revision !== settingsRevision(saved.settings)) {
           throw new HttpError(409, "This repository's settings changed since the page loaded; reload and try again");
         }
-        requireRepoSettingsRules(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
+        requireRepoSettingsLists(globalSettings, saved, settings, followGlobal ?? saved.followGlobal);
       } else if (followGlobal === false && saved.followGlobal) {
         // Leaving the global settings activates the saved ones, read under the
         // row lock, so they are checked as a save of them would be.
-        requireRepoSettingsRules(globalSettings, saved, saved.settings, false);
+        requireRepoSettingsLists(globalSettings, saved, saved.settings, false);
       }
     }
     const row = await tx.repository.update({
@@ -272,12 +272,12 @@ async function lockForRules(tx: Prisma.TransactionClient, workspaceId: string, i
   return workspace?.review_settings;
 }
 
-// Repository rules the layers below would leave out are refused, and so are
-// folder rules these settings would newly push out (a repository rule taking
-// a folder rule's id, or the combined limit), since the folder would otherwise
-// lose them with only a review warning. A folder that was already broken
+// Repository rules and custom reviewers the layers below would leave out are
+// refused, and so are folder ones these settings would newly push out (a
+// repository entry taking a folder entry's id, or a combined limit), since the
+// folder would otherwise lose them with only a review warning. A folder that was already broken
 // before this save stays a warning, so it does not block unrelated edits.
-export function requireRepoSettingsRules(
+export function requireRepoSettingsLists(
   globalSettings: unknown,
   saved: { settings: unknown; directories: unknown },
   settings: unknown,

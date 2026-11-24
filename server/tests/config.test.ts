@@ -201,7 +201,7 @@ describe("resolveConfig", () => {
         global: { rules: [rule("shared")] },
         repoSettings: { rules: [rule("shared")] },
       });
-      expect(combinedIssues).toEqual([expect.objectContaining({ layer: "repoSettings", kind: "clash" })]);
+      expect(combinedIssues).toEqual([expect.objectContaining({ layer: "repoSettings", list: "rules", kind: "clash" })]);
     });
 
     it("hold dashboard rules to the dashboard's thresholds, which a file can only tighten", () => {

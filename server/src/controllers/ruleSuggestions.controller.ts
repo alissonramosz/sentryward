@@ -11,7 +11,7 @@ import {
   saveRuleSuggestionSettingsSchema,
 } from "../schemas/ruleSuggestions.schema.ts";
 import { loadRuleAndReviewerRepositories, repositoryCombinedIssues } from "./config.controller.ts";
-import { requireRepoSettingsRules } from "./repos.controller.ts";
+import { requireRepoSettingsLists } from "./repos.controller.ts";
 
 // Rule suggestions drafted by worker/ruleSuggestions.ts. Nothing reaches a
 // config layer until an admin approves one here, through the same checks as
@@ -324,7 +324,7 @@ export async function approveRuleSuggestion(req: Request, res: Response) {
         throw new HttpError(409, "This repository follows the global settings, so its own rules would be ignored: choose Global, or give it settings of its own first");
       }
       const settings = withRule(saved.settings, rule, "repository");
-      requireRepoSettingsRules(workspace!.review_settings, saved, settings, false);
+      requireRepoSettingsLists(workspace!.review_settings, saved, settings, false);
       await tx.repository.update({ where: { id: repo.id }, data: { settings } });
       appliedTarget = repo.id;
     }

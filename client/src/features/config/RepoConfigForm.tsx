@@ -88,8 +88,8 @@ export function RepoConfigForm(props: {
       // The server checks rules and custom reviewers against the global config
       // as saved now, which may have changed since this page loaded.
       const fields = err instanceof ApiError ? err.fieldErrors : undefined
-      const rulesError = fields?.rules?.[0] ?? fields?.reviewers?.[0]
-      toast.error(rulesError ?? (err instanceof Error ? err.message : "Could not save settings"))
+      const listError = fields?.rules?.[0] ?? fields?.reviewers?.[0]
+      toast.error(listError ?? (err instanceof Error ? err.message : "Could not save settings"))
     }
   }
 

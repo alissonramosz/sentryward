@@ -400,7 +400,10 @@ export function reviewerRowValid(row: ReviewerRow): boolean {
 }
 
 function reviewerChars(reviewers: CustomReviewer[]): number {
-  return reviewers.reduce((sum, r) => sum + r.name.length + r.instructions.length + (r.paths?.join(", ").length ?? 0), 0)
+  return reviewers.reduce(
+    (sum, r) => sum + r.name.length + r.instructions.length + (r.paths?.reduce((pathSum, path) => pathSum + path.length, 0) ?? 0),
+    0,
+  )
 }
 
 function languageMap(rows: LanguageRow[]): Record<string, string> {

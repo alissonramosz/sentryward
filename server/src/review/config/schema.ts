@@ -374,7 +374,16 @@ export const customReviewerSchema = z.strictObject({
 export type CustomReviewer = z.infer<typeof customReviewerSchema>;
 
 function reviewerChars(reviewers: CustomReviewer[]): number {
-  return reviewers.reduce((sum, reviewer) => sum + reviewer.name.length + reviewer.instructions.length + (reviewer.paths?.join(", ").length ?? 0), 0);
+  // Paths are counted without separators: unlike rule paths, a reviewer's
+  // paths only filter files and are never printed in a prompt.
+  return reviewers.reduce(
+    (sum, reviewer) =>
+      sum +
+      reviewer.name.length +
+      reviewer.instructions.length +
+      (reviewer.paths?.reduce((pathSum, path) => pathSum + path.length, 0) ?? 0),
+    0,
+  );
 }
 
 // The limits on a list as a whole, for the combination of layers (resolve.ts).

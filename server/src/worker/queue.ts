@@ -393,7 +393,11 @@ export async function releaseLease(id: string, attempts: number): Promise<void> 
 // whose change has a newer job that already started: that happens only when
 // this run's lease ran out while it was still alive (a stalled process), and
 // the newer head must win, so this run publishes nothing more. A trial is never
-// overtaken that way: it publishes nothing to race (see enqueueTrial).
+// overtaken that way, by a review or another trial, even after its lease ran
+// out: the lease only orders what runs write to the forge, and a trial writes
+// nothing there (see enqueueTrial). Fencing it would only leave its row running
+// until recoverStale requeued it, so whoever is waiting on the trial would see
+// it hang and then run again.
 export async function claimState(id: string, attempts: number): Promise<"owned" | "cancelled" | "disabled" | "lost"> {
   const job = await prisma.reviewJob.findUnique({
     where: { id },
